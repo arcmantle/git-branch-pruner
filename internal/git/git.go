@@ -154,6 +154,7 @@ func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy So
 // where feature branches may be merged back into any of them.
 func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortField) ([]Branch, error) {
 	type ref struct {
+		idx      int
 		name     string
 		tip      string
 		isRemote bool
@@ -168,7 +169,7 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 	for _, line := range splitLines(localOut) {
 		parts := strings.Fields(line)
 		if len(parts) == 2 {
-			allRefs = append(allRefs, ref{name: parts[0], tip: parts[1], isRemote: false})
+			allRefs = append(allRefs, ref{idx: len(allRefs), name: parts[0], tip: parts[1], isRemote: false})
 		}
 	}
 
@@ -187,13 +188,12 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 				if strings.Contains(name, "HEAD") {
 					continue
 				}
-				allRefs = append(allRefs, ref{name: name, tip: parts[1], isRemote: true})
+				allRefs = append(allRefs, ref{idx: len(allRefs), name: name, tip: parts[1], isRemote: true})
 			}
 		}
 	}
 
 	total := len(allRefs)
-	var progress atomic.Int32
 	fpc := newFirstParentCache()
 
 	type result struct {
@@ -204,32 +204,41 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 
 	workers := runtime.NumCPU()
 	if workers > 8 {
-		workers = 8 // cap: each worker spawns git subprocesses
+		workers = 8
 	}
-	sem := make(chan struct{}, workers)
+
+	// Fixed worker pool: exactly `workers` goroutines pull jobs from a buffered channel.
+	// Much cheaper than spawning one goroutine per branch (which would park most of them
+	// waiting on a semaphore for large repos).
+	jobs := make(chan ref, workers*2)
 	var wg sync.WaitGroup
+	var progress atomic.Int32
 
-	for i, r := range allRefs {
+	for range workers {
 		wg.Add(1)
-		go func(i int, r ref) {
+		go func() {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			mergedInto := findContainer(repoPath, r.name, r.tip, false, fpc)
-			if mergedInto == "" && includeRemote {
-				mergedInto = findContainer(repoPath, r.name, r.tip, true, fpc)
-			}
-			if mergedInto != "" {
-				results[i] = result{
-					branch: Branch{Name: r.name, IsRemote: r.isRemote, MergedInto: mergedInto},
-					found:  true,
+			for r := range jobs {
+				mergedInto := findContainer(repoPath, r.name, r.tip, false, fpc)
+				if mergedInto == "" && includeRemote {
+					mergedInto = findContainer(repoPath, r.name, r.tip, true, fpc)
 				}
+				if mergedInto != "" {
+					results[r.idx] = result{
+						branch: Branch{Name: r.name, IsRemote: r.isRemote, MergedInto: mergedInto},
+						found:  true,
+					}
+				}
+				n := progress.Add(1)
+				fmt.Fprintf(os.Stderr, "\rAnalysing branches... %d/%d", n, total)
 			}
-			n := progress.Add(1)
-			fmt.Fprintf(os.Stderr, "\rAnalysing branches... %d/%d", n, total)
-		}(i, r)
+		}()
 	}
+
+	for _, r := range allRefs {
+		jobs <- r
+	}
+	close(jobs)
 	wg.Wait()
 	fmt.Fprintln(os.Stderr)
 
@@ -240,18 +249,22 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 		}
 	}
 
-	// Enrich age in parallel
+	// Enrich age with the same fixed worker pool pattern.
+	enrichJobs := make(chan int, workers*2)
 	var enrichWg sync.WaitGroup
-	enrichSem := make(chan struct{}, workers)
-	for i := range candidates {
+	for range workers {
 		enrichWg.Add(1)
-		go func(i int) {
+		go func() {
 			defer enrichWg.Done()
-			enrichSem <- struct{}{}
-			defer func() { <-enrichSem }()
-			enrichAge(repoPath, &candidates[i])
-		}(i)
+			for i := range enrichJobs {
+				enrichAge(repoPath, &candidates[i])
+			}
+		}()
 	}
+	for i := range candidates {
+		enrichJobs <- i
+	}
+	close(enrichJobs)
 	enrichWg.Wait()
 
 	sortBranches(candidates, sortBy)
