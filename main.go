@@ -1,6 +1,6 @@
 package main
 
-import "github.com/roen/git-branch-pruner/cmd"
+import "github.com/arcmantle/git-branch-pruner/cmd"
 
 func main() {
 	cmd.Execute()

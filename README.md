@@ -5,13 +5,13 @@ A CLI tool to find and delete merged git branches that are candidates for cleanu
 ## Installation
 
 ```bash
-go install github.com/roen/git-branch-pruner@latest
+go install github.com/arcmantle/git-branch-pruner@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/roen/git-branch-pruner.git
+git clone https://github.com/arcmantle/git-branch-pruner.git
 cd git-branch-pruner
 go build -o git-branch-pruner .
 ```
@@ -21,7 +21,7 @@ go build -o git-branch-pruner .
 ### List merged branches
 
 ```bash
-# List all merged branches
+# List all merged branches (sorted oldest first)
 git-branch-pruner list
 
 # Only branches older than 30 days
@@ -30,6 +30,12 @@ git-branch-pruner list --older-than 30
 # Include remote branches
 git-branch-pruner list --remote
 
+# Sort by name instead of age
+git-branch-pruner list --sort name
+
+# Output as JSON (for scripting)
+git-branch-pruner list --json
+
 # Check against a specific target branch
 git-branch-pruner list --target main
 ```
@@ -37,7 +43,7 @@ git-branch-pruner list --target main
 ### Delete merged branches
 
 ```bash
-# Preview what would be deleted
+# Preview what would be deleted (dry run)
 git-branch-pruner prune --dry-run
 
 # Delete with confirmation prompt
@@ -59,6 +65,7 @@ git-branch-pruner prune --remote
 |------|-------------|
 | `-C, --repo` | Path to the git repository (default: current directory) |
 | `--protected` | Branches to never delete (default: `main,master,develop`) |
+| `--no-color` | Disable color output |
 
 ## Examples
 
@@ -68,6 +75,9 @@ git-branch-pruner prune -C /path/to/repo --older-than 60
 
 # Custom protected branches
 git-branch-pruner prune --protected main,staging,production
+
+# Scripting: get merged branches as JSON
+git-branch-pruner list --json | jq '.[].name'
 
 # Full pipeline: list, review, then prune
 git-branch-pruner list --older-than 30
