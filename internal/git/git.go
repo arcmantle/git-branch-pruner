@@ -6,9 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -149,8 +152,6 @@ func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy So
 // at least one OTHER existing branch, regardless of which branch that is.
 // This correctly handles repos with multiple long-lived branches (hotfix/*, release/*, etc.)
 // where feature branches may be merged back into any of them.
-//
-// Note: requires one git call per branch, so may be slower on very large repos.
 func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortField) ([]Branch, error) {
 	type ref struct {
 		name     string
@@ -160,7 +161,6 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 
 	var allRefs []ref
 
-	// Collect local branches with their tip SHAs in one call
 	localOut, err := runGit(repoPath, "branch", "--format=%(refname:short) %(objectname)")
 	if err != nil {
 		return nil, err
@@ -180,7 +180,6 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 		for _, line := range splitLines(remoteOut) {
 			parts := strings.Fields(line)
 			if len(parts) == 2 {
-				// skip origin/HEAD (symref) — its refname:short is just "origin" (no slash)
 				if !strings.Contains(parts[0], "/") {
 					continue
 				}
@@ -193,46 +192,105 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 		}
 	}
 
-	var candidates []Branch
 	total := len(allRefs)
-	for i, r := range allRefs {
-		fmt.Fprintf(os.Stderr, "\rAnalysing branches... %d/%d", i+1, total)
-		mergedInto := findContainer(repoPath, r.name, r.tip, false)
-		if mergedInto == "" && includeRemote {
-			mergedInto = findContainer(repoPath, r.name, r.tip, true)
-		}
-		if mergedInto != "" {
-			candidates = append(candidates, Branch{
-				Name:       r.name,
-				IsRemote:   r.isRemote,
-				MergedInto: mergedInto,
-			})
-		}
-	}
-	fmt.Fprintln(os.Stderr) // newline after progress
+	var progress atomic.Int32
+	fpc := newFirstParentCache()
 
-	for i := range candidates {
-		enrichAge(repoPath, &candidates[i])
+	type result struct {
+		branch Branch
+		found  bool
 	}
+	results := make([]result, total)
+
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8 // cap: each worker spawns git subprocesses
+	}
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+
+	for i, r := range allRefs {
+		wg.Add(1)
+		go func(i int, r ref) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			mergedInto := findContainer(repoPath, r.name, r.tip, false, fpc)
+			if mergedInto == "" && includeRemote {
+				mergedInto = findContainer(repoPath, r.name, r.tip, true, fpc)
+			}
+			if mergedInto != "" {
+				results[i] = result{
+					branch: Branch{Name: r.name, IsRemote: r.isRemote, MergedInto: mergedInto},
+					found:  true,
+				}
+			}
+			n := progress.Add(1)
+			fmt.Fprintf(os.Stderr, "\rAnalysing branches... %d/%d", n, total)
+		}(i, r)
+	}
+	wg.Wait()
+	fmt.Fprintln(os.Stderr)
+
+	var candidates []Branch
+	for _, res := range results {
+		if res.found {
+			candidates = append(candidates, res.branch)
+		}
+	}
+
+	// Enrich age in parallel
+	var enrichWg sync.WaitGroup
+	enrichSem := make(chan struct{}, workers)
+	for i := range candidates {
+		enrichWg.Add(1)
+		go func(i int) {
+			defer enrichWg.Done()
+			enrichSem <- struct{}{}
+			defer func() { <-enrichSem }()
+			enrichAge(repoPath, &candidates[i])
+		}(i)
+	}
+	enrichWg.Wait()
+
 	sortBranches(candidates, sortBy)
 	return candidates, nil
 }
 
+// firstParentCache caches the set of first-parent commit SHAs per container branch.
+// Computing this per container once (rather than per candidate) is a major speedup:
+// a container with 100k commits would otherwise be rev-listed once per candidate.
+type firstParentCache struct {
+	mu    sync.Mutex
+	cache map[string]map[string]bool
+}
+
+func newFirstParentCache() *firstParentCache {
+	return &firstParentCache{cache: make(map[string]map[string]bool)}
+}
+
 // isTrivialAncestor returns true if tip is on the first-parent path of container.
-// This means container simply descended FROM tip (e.g. container was branched from
-// the candidate, or pulled it in as a sync), rather than tip being merged INTO container.
-// In that case "container contains tip" is trivially true and should not count as a merge.
-func isTrivialAncestor(repoPath, tip, container string) bool {
-out, err := runGit(repoPath, "rev-list", "--first-parent", container)
-if err != nil {
-return false
-}
-for _, line := range splitLines(out) {
-if strings.HasPrefix(line, tip) {
-return true
-}
-}
-return false
+// The first-parent list is computed once per container and then cached.
+func (c *firstParentCache) isTrivialAncestor(repoPath, tip, container string) bool {
+	c.mu.Lock()
+	shas, ok := c.cache[container]
+	c.mu.Unlock()
+	if !ok {
+		out, err := runGit(repoPath, "rev-list", "--first-parent", container)
+		shas = make(map[string]bool)
+		if err == nil {
+			for _, line := range splitLines(out) {
+				if line != "" {
+					shas[line] = true
+				}
+			}
+		}
+		c.mu.Lock()
+		c.cache[container] = shas
+		c.mu.Unlock()
+	}
+	return shas[tip]
 }
 
 // preferredBases are checked first when picking which branch to show in "merged into".
@@ -243,7 +301,7 @@ var preferredBases = []string{"main", "master", "develop", "development", "trunk
 // that contains the given tip commit via a real merge (not trivial ancestry).
 // Prefers well-known base branches over incidental containers.
 // Returns "" if no valid container is found.
-func findContainer(repoPath, branchName, tip string, remote bool) string {
+func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstParentCache) string {
 args := []string{"branch", "--contains", tip, "--format=%(refname:short)"}
 if remote {
 args = append(args[:1], append([]string{"-r"}, args[1:]...)...)
@@ -261,7 +319,7 @@ continue
 }
 // Skip this container if the candidate's tip is on its first-parent path —
 // that means container descended from candidate, not that candidate was merged in.
-if isTrivialAncestor(repoPath, tip, shortC) {
+if fpc.isTrivialAncestor(repoPath, tip, shortC) {
 continue
 }
 containers = append(containers, shortC)
@@ -557,11 +615,12 @@ func assertMergedAnywhere(repoPath string, b Branch) error {
 	if err != nil {
 		return fmt.Errorf("could not resolve %q: %w", b.Name, err)
 	}
-	if container := findContainer(repoPath, b.Name, tip, false); container != "" {
+	fpc := newFirstParentCache()
+	if container := findContainer(repoPath, b.Name, tip, false, fpc); container != "" {
 		return nil
 	}
 	if b.IsRemote {
-		if container := findContainer(repoPath, b.Name, tip, true); container != "" {
+		if container := findContainer(repoPath, b.Name, tip, true, fpc); container != "" {
 			return nil
 		}
 	}
