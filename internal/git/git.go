@@ -558,7 +558,10 @@ func matchGlob(pattern, name string) (bool, error) {
 //
 //   - Tier 0 branches are never prunable.
 //   - Tier N (N>0) branches are prunable only when merged into a branch at tier < N.
-//   - Branches not matching any tier are unaffected (prunable as normal).
+//   - Branches not in any tier are treated as an implicit lowest tier: prunable only
+//     if merged into a branch that IS in an explicit tier (any tier level).
+//     This prevents e.g. task/foo merged into task/bar from being prunable until
+//     the work reaches a named tier branch like main or release/*.
 func FilterByTierHierarchy(branches []Branch, tiers [][]string) []Branch {
 	if len(tiers) == 0 {
 		return branches
@@ -568,12 +571,14 @@ func FilterByTierHierarchy(branches []Branch, tiers [][]string) []Branch {
 		tier := matchTier(b.Name, tiers)
 		switch {
 		case tier < 0:
-			// Not in any tier — normal branch, keep it.
-			filtered = append(filtered, b)
+			// Implicit lowest tier: prunable only if merged into an explicit tier branch.
+			if matchTier(b.MergedInto, tiers) >= 0 {
+				filtered = append(filtered, b)
+			}
 		case tier == 0:
 			// Tier 0: never prunable.
 		default:
-			// Tier N: prunable only if merged into a branch at a lower tier.
+			// Tier N: prunable only if merged into a branch at a lower tier number.
 			containerTier := matchTier(b.MergedInto, tiers)
 			if containerTier >= 0 && containerTier < tier {
 				filtered = append(filtered, b)
