@@ -1,0 +1,12 @@
+# Binary
+git-branch-pruner
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
