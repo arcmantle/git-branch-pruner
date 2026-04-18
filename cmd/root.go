@@ -58,7 +58,7 @@ func wrapColumn(s string, width int) []string {
 func printTable(headers []string, rows [][]string) {
 	const colPad = 2
 	const minBranchCol = 20
-	const maxBranchCol = 60
+	const maxBranchCol = 80
 	n := len(headers)
 
 	// Compute natural widths from data (ignoring ANSI).
