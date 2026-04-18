@@ -25,7 +25,7 @@ type Branch struct {
 	AgeDays     int
 	RelativeAge string
 	MergedInto  string // the branch this was found merged into; used for deletion verification
-	ShortSHA    string // 7-char abbreviated tip commit hash
+	SHA         string // full 40-char tip commit hash
 	Author      string // author of the first commit unique to this branch (optional, requires --authors)
 }
 
@@ -300,24 +300,42 @@ func newFirstParentCache() *firstParentCache {
 	return &firstParentCache{cache: make(map[string]map[string]bool)}
 }
 
+// FirstParentCache is an opaque cache for first-parent ancestry queries.
+// Create one with NewFirstParentCache and pass it to VerifyMerged
+// to amortise expensive rev-list calls across many deletions.
+type FirstParentCache = firstParentCache
+
+// NewFirstParentCache returns an empty, ready-to-use FirstParentCache.
+func NewFirstParentCache() *FirstParentCache {
+	return newFirstParentCache()
+}
+
 // isTrivialAncestor returns true if tip is on the first-parent path of container.
 // The first-parent list is computed once per container and then cached.
+// A double-checked locking pattern prevents redundant rev-list calls and ensures
+// all goroutines ultimately read from the same cached map.
 func (c *firstParentCache) isTrivialAncestor(repoPath, tip, container string) bool {
 	c.mu.Lock()
 	shas, ok := c.cache[container]
 	c.mu.Unlock()
 	if !ok {
 		out, err := runGit(repoPath, "rev-list", "--first-parent", container)
-		shas = make(map[string]bool)
+		newShas := make(map[string]bool)
 		if err == nil {
 			for _, line := range splitLines(out) {
 				if line != "" {
-					shas[line] = true
+					newShas[line] = true
 				}
 			}
 		}
 		c.mu.Lock()
-		c.cache[container] = shas
+		// Re-check: another goroutine may have populated the entry while we were computing.
+		if existing, ok2 := c.cache[container]; ok2 {
+			shas = existing
+		} else {
+			c.cache[container] = newShas
+			shas = newShas
+		}
 		c.mu.Unlock()
 	}
 	return shas[tip]
@@ -332,9 +350,11 @@ var preferredBases = []string{"main", "master", "develop", "development", "trunk
 // Prefers well-known base branches over incidental containers.
 // Returns "" if no valid container is found.
 func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstParentCache) string {
-	args := []string{"branch", "--contains", tip, "--format=%(refname:short)"}
+	var args []string
 	if remote {
-		args = append(args[:1], append([]string{"-r"}, args[1:]...)...)
+		args = []string{"branch", "-r", "--contains", tip, "--format=%(refname:short)"}
+	} else {
+		args = []string{"branch", "--contains", tip, "--format=%(refname:short)"}
 	}
 	out, err := runGit(repoPath, args...)
 	if err != nil {
@@ -379,13 +399,13 @@ func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstPare
 	return containers[0]
 }
 
-// enrichAge fills in LastCommit, AgeDays, RelativeAge, and ShortSHA for a branch.
+// enrichAge fills in LastCommit, AgeDays, RelativeAge, and SHA for a branch.
 func enrichAge(repoPath string, b *Branch) {
 	ref := b.Name
 	if b.IsRemote {
 		ref = "origin/" + b.Name
 	}
-	out, err := runGit(repoPath, "log", "-1", "--format=%ct %h", ref)
+	out, err := runGit(repoPath, "log", "-1", "--format=%ct %H", ref)
 	if err != nil || out == "" {
 		return
 	}
@@ -400,7 +420,7 @@ func enrichAge(repoPath string, b *Branch) {
 		}
 	}
 	if len(fields) >= 2 {
-		b.ShortSHA = fields[1]
+		b.SHA = fields[1]
 	}
 }
 
@@ -441,7 +461,7 @@ func EnrichAuthors(repoPath string, branches []Branch) {
 // tip commit's author, which is the most recent person to work on the branch and a
 // reliable proxy for ownership.
 func firstBranchAuthor(repoPath string, b *Branch) string {
-	if b.ShortSHA == "" {
+	if b.SHA == "" {
 		return ""
 	}
 	base := b.MergedInto
@@ -449,16 +469,13 @@ func firstBranchAuthor(repoPath string, b *Branch) string {
 		base = "HEAD"
 	}
 
-	mergeBase, err := runGit(repoPath, "merge-base", b.ShortSHA, base)
+	mergeBase, err := runGit(repoPath, "merge-base", b.SHA, base)
 	if err == nil && mergeBase != "" {
-		// Expand the short SHA so we can compare it against the full merge-base hash.
-		fullSHA, expandErr := runGit(repoPath, "rev-parse", b.ShortSHA)
-		tipInBase := expandErr == nil && mergeBase == fullSHA
-		if !tipInBase {
+		if mergeBase != b.SHA {
 			// Tip is not directly in the target's history (squash / rebase merge).
 			// Walk the branch-unique commits in chronological order and take the first.
 			out, logErr := runGit(repoPath, "log", "--ancestry-path", "--reverse",
-				"--format=%an", mergeBase+".."+b.ShortSHA)
+				"--format=%an", mergeBase+".."+b.SHA)
 			if logErr == nil && out != "" {
 				return strings.SplitN(out, "\n", 2)[0]
 			}
@@ -466,7 +483,7 @@ func firstBranchAuthor(repoPath string, b *Branch) string {
 	}
 
 	// Fallback (regular merge commit, or any error above): author of the tip commit.
-	out, err := runGit(repoPath, "log", "-1", "--format=%an", b.ShortSHA)
+	out, err := runGit(repoPath, "log", "-1", "--format=%an", b.SHA)
 	if err != nil {
 		return ""
 	}
@@ -597,13 +614,15 @@ func matchTier(name string, tiers [][]string) int {
 }
 
 // globMatch reports whether name matches the glob pattern p.
-// Supports * (any sequence within a segment) and ** (any path).
-// Falls back to exact match if path.Match returns an error.
+// Supports * (any sequence within a segment) and ? (single non-/ char).
+// The special suffix /* matches the exact prefix and any sub-path beneath it
+// (e.g. "release/*" matches "release/1.0" and "release/1.0/patch").
+// Falls back to exact match if the pattern contains unsupported syntax.
 func globMatch(p, name string) bool {
 	// path.Match treats / specially; use simple prefix match for "prefix/*" patterns
 	if strings.HasSuffix(p, "/*") {
 		prefix := strings.TrimSuffix(p, "/*")
-		return name == prefix || strings.HasPrefix(name, prefix+"/")
+		return strings.HasPrefix(name, prefix+"/")
 	}
 	matched, err := matchGlob(p, name)
 	if err != nil {
@@ -689,25 +708,32 @@ func FilterByTierHierarchy(branches []Branch, tiers [][]string) []Branch {
 	return filtered
 }
 
-// DeleteBranch deletes a branch, verifying it is still merged into b.MergedInto
-// (or into any other branch if MergedInto is empty) before proceeding.
-// Uses -D after our own verification so the deletion succeeds regardless of
-// which branch is currently checked out.
-func DeleteBranch(repoPath string, b Branch) error {
+// VerifyMerged checks that b is still merged (into b.MergedInto, or anywhere if empty)
+// without deleting it. Use this to pre-validate remote branches before a batch push.
+func VerifyMerged(repoPath string, b Branch, fpc *FirstParentCache) error {
 	if b.MergedInto != "" {
-		if err := assertMergedInto(repoPath, b, b.MergedInto); err != nil {
-			return err
-		}
-	} else {
-		if err := assertMergedAnywhere(repoPath, b); err != nil {
-			return err
-		}
+		return assertMergedInto(repoPath, b, b.MergedInto)
 	}
-	if b.IsRemote {
-		_, err := runGit(repoPath, "push", "origin", "--delete", b.Name)
-		return err
-	}
+	return assertMergedAnywhereWithCache(repoPath, b, fpc)
+}
+
+// DeleteLocalBranch deletes a local branch without re-verifying merge status.
+// Call VerifyMerged first to ensure safety.
+func DeleteLocalBranch(repoPath string, b Branch) error {
 	_, err := runGit(repoPath, "branch", "-D", b.Name)
+	return err
+}
+
+// BatchDeleteRemoteBranches deletes all named remote branches in a single
+// "git push origin --delete" call, which is much faster than one call per branch.
+// Returns an error if the push fails; on failure the caller should fall back to
+// individual deletions to identify which specific branches could not be removed.
+func BatchDeleteRemoteBranches(repoPath string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	args := append([]string{"push", "origin", "--delete"}, names...)
+	_, err := runGit(repoPath, args...)
 	return err
 }
 
@@ -724,8 +750,7 @@ func assertMergedInto(repoPath string, b Branch, target string) error {
 	return nil
 }
 
-// assertMergedAnywhere verifies the branch tip is still contained in some other branch.
-func assertMergedAnywhere(repoPath string, b Branch) error {
+func assertMergedAnywhereWithCache(repoPath string, b Branch, fpc *firstParentCache) error {
 	ref := b.Name
 	if b.IsRemote {
 		ref = "origin/" + b.Name
@@ -734,7 +759,6 @@ func assertMergedAnywhere(repoPath string, b Branch) error {
 	if err != nil {
 		return fmt.Errorf("could not resolve %q: %w", b.Name, err)
 	}
-	fpc := newFirstParentCache()
 	if container := findContainer(repoPath, b.Name, tip, false, fpc); container != "" {
 		return nil
 	}

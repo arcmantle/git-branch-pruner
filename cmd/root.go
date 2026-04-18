@@ -129,15 +129,45 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:     "git-branch-pruner",
-	Short:   "Find and delete merged git branches",
-	Long:    "A CLI tool to identify branches that have been merged and are candidates for deletion, with configurable age filtering.",
-	Version: Version,
+	Use:          "git-branch-pruner",
+	Short:        "Find and delete merged git branches",
+	Long:         "A CLI tool to identify branches that have been merged and are candidates for deletion, with configurable age filtering.",
+	Version:      Version,
+	SilenceErrors: true,
+	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 		if noColor {
 			color.NoColor = true
 		}
+
+		// Warn when --protected was explicitly set and none of the default protected
+		// branches (main, master, develop) appear in the new list. This prevents the
+		// common footgun of `--protected staging` silently removing main from protection.
+		if cmd.Flags().Changed("protected") || cmd.PersistentFlags().Changed("protected") {
+			protectedSet := make(map[string]bool, len(protectedBranches))
+			for _, p := range protectedBranches {
+				protectedSet[strings.TrimSpace(p)] = true
+			}
+			anyDefaultKept := false
+			for _, def := range protectedDefault {
+				if protectedSet[def] {
+					anyDefaultKept = true
+					break
+				}
+			}
+			if !anyDefaultKept {
+				fmt.Fprintf(os.Stderr,
+					"⚠ Warning: --protected replaces the default list. "+
+						"Default branches (%s) are no longer protected.\n\n",
+					strings.Join(protectedDefault, ", "))
+			}
+		}
+
 		// If the first positional arg looks like a URL, clone it to a temp bare repo.
+		// prune does not support remote URLs — catch it here before an expensive clone.
+		if len(args) > 0 && isURL(args[0]) && cmd.Name() == "prune" {
+			return fmt.Errorf("prune does not support remote URLs — use 'list <url>' to analyse a remote repository")
+		}
 		if len(args) > 0 && isURL(args[0]) {
 			url := args[0]
 			tmpDir, err := os.MkdirTemp("", "git-branch-pruner-*")

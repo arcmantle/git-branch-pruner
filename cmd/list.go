@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/arcmantle/git-branch-pruner/internal/git"
 	"github.com/fatih/color"
@@ -82,6 +83,9 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 			git.EnrichAuthors(repoPath, branches)
 		}
 
+		// When writing to a file, disable color in the output.
+		fileMode := listOutput != ""
+
 		// Resolve output writer.
 		out, closeOut, err := resolveOutput(listOutput)
 		if err != nil {
@@ -89,11 +93,21 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 		}
 		defer closeOut()
 
-		// When writing to a file, disable color in the output.
-		fileMode := listOutput != ""
-
 		if len(branches) == 0 {
-			if !fileMode {
+			if fileMode {
+				// Write valid empty output so the file is not silently empty/invalid.
+				switch format {
+				case "json":
+					if err := writeJSON(out, nil, buildMeta()); err != nil {
+						return err
+					}
+				case "csv":
+					if err := writeCSV(out, nil, buildMeta()); err != nil {
+						return err
+					}
+				}
+				fmt.Fprintln(os.Stderr, "No merged branches found.")
+			} else {
 				fmt.Print("No merged branches found")
 				fmt.Print(filterSuffix(listTarget, listOlderThan, includeRemote))
 				fmt.Println(".")
@@ -168,8 +182,10 @@ func buildRows(branches []git.Branch, fileMode bool) [][]string {
 			mergedInto = dimColor.Sprint("(any)")
 		}
 		sha := "unknown"
-		if b.ShortSHA != "" {
-			sha = b.ShortSHA
+		if len(b.SHA) >= 7 {
+			sha = b.SHA[:7]
+		} else if b.SHA != "" {
+			sha = b.SHA
 		} else if !fileMode {
 			sha = dimColor.Sprint("unknown")
 		}
@@ -192,11 +208,11 @@ func printTableTo(w io.Writer, headers []string, rows [][]string) {
 	n := len(headers)
 	widths := make([]int, n)
 	for i, h := range headers {
-		widths[i] = len(h)
+		widths[i] = utf8.RuneCountInString(h)
 	}
 	for _, row := range rows {
 		for j := 0; j < n && j < len(row); j++ {
-			if l := len(row[j]); l > widths[j] {
+			if l := utf8.RuneCountInString(row[j]); l > widths[j] {
 				widths[j] = l
 			}
 		}
@@ -249,7 +265,7 @@ func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error
 			MergedInto:  b.MergedInto,
 			AgeDays:     b.AgeDays,
 			RelativeAge: b.RelativeAge,
-			SHA:         b.ShortSHA,
+			SHA:         b.SHA,
 			Author:      b.Author,
 		}
 		if !b.LastCommit.IsZero() {
@@ -263,25 +279,19 @@ func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error
 }
 
 func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error {
-	cw := csv.NewWriter(w)
-	// Header row first — CSV viewers treat row 1 as the header and color it.
-	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha", "author"}); err != nil {
-		return err
-	}
-	cw.Flush()
-	if err := cw.Error(); err != nil {
-		return err
-	}
-
-	// Metadata as # comment lines after the header.
-	// Skipped by loadBranchCSV; visible as context when opening the file.
+	// Metadata as # comment lines before the header row so that tools like pandas
+	// (comment='#') and other CSV parsers can strip them cleanly.
+	// Skipped by loadBranchCSV as well.
 	if r := meta["remote_url"]; r != "" {
 		fmt.Fprintf(w, "# remote_url: %s\n", r)
 	}
 	fmt.Fprintf(w, "# generated: %s\n", meta["generated"])
 
-	// New writer needed after raw writes to w to keep buffering aligned.
-	cw = csv.NewWriter(w)
+	cw := csv.NewWriter(w)
+	// Header row — CSV viewers treat this as the column header row.
+	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha", "author"}); err != nil {
+		return err
+	}
 	for _, b := range branches {
 		bType := "local"
 		if b.IsRemote || isBareClone {
@@ -299,7 +309,7 @@ func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error 
 			fmt.Sprintf("%d", b.AgeDays),
 			b.RelativeAge,
 			lastCommit,
-			b.ShortSHA,
+			b.SHA,
 			b.Author,
 		}); err != nil {
 			return err

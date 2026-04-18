@@ -102,7 +102,7 @@ git-branch-pruner prune --input branches.csv
 | `--target BRANCH` | | Narrow to branches merged into this branch only |
 | `--sort age\|name` | age | Sort order |
 | `--json` | false | Output candidates as JSON without deleting anything |
-| `--input FILE` | | CSV or JSON file from `list --output`; delete exactly these branches |
+| `--input FILE` | | CSV or JSON file from `list --output`; delete exactly these branches (only `--protected` is re-applied; age/tier/exclude filters are ignored) |
 
 ### Global flags
 
@@ -114,6 +114,10 @@ git-branch-pruner prune --input branches.csv
 | `--exclude-merged-into PATTERN` | Exclude branches merged into a branch matching this regex (repeatable) |
 | `--tier PATTERNS` | Protection tier (repeatable, first = highest priority); e.g. `--tier "main,master"` |
 | `--tiers HIERARCHY` | Protection hierarchy in one string, levels separated by `<-`; e.g. `--tiers "main,master <- release/* <- hotfix/*"` |
+
+> **Note:** `--protected` **replaces** the default list (`main`, `master`, `develop`). Always include every branch you want protected.
+> Example: `--protected main,master,develop,staging` — not just `--protected staging`.
+> The tool will warn you when the override excludes all default branches.
 
 > **Note:** Remote branch operations assume the remote is named `origin`. Repositories
 > using a different primary remote name are not currently supported for `--remote` operations.

@@ -152,20 +152,66 @@ repository without cloning it yourself.`,
 			}
 		}
 
-		// Delete branches — each branch carries its MergedInto target for verification
+		// Delete branches — each branch carries its MergedInto target for verification.
+		// A shared FirstParentCache avoids redundant rev-list --first-parent calls
+		// when multiple branches have an empty MergedInto (e.g. loaded from --input).
+		// Remote branches are batched into a single "git push origin --delete" call;
+		// if the batch fails we fall back to individual pushes for precise error reporting.
 		var errs []string
 		deleted := 0
+		fpc := git.NewFirstParentCache()
+
+		// Separate local and remote; verify all before touching anything.
+		var localBranches []git.Branch
+		var remoteBranches []git.Branch
 		for _, b := range deletable {
-			bType := "local"
-			if b.IsRemote {
-				bType = "remote"
-			}
-			if err := git.DeleteBranch(repoPath, b); err != nil {
+			if err := git.VerifyMerged(repoPath, b, fpc); err != nil {
+				bType := "local"
+				if b.IsRemote {
+					bType = "remote"
+				}
 				errs = append(errs, fmt.Sprintf("%s (%s): %v", b.Name, bType, err))
-				errorColor.Fprintf(os.Stderr, "  ✗ Failed to delete %s (%s): %v\n", b.Name, bType, err)
+				errorColor.Fprintf(os.Stderr, "  ✗ Failed to verify %s (%s): %v\n", b.Name, bType, err)
+			} else if b.IsRemote {
+				remoteBranches = append(remoteBranches, b)
 			} else {
-				successColor.Printf("  ✓ Deleted %s (%s)\n", b.Name, bType)
+				localBranches = append(localBranches, b)
+			}
+		}
+
+		// Delete local branches one by one.
+		for _, b := range localBranches {
+			if err := git.DeleteLocalBranch(repoPath, b); err != nil {
+				errs = append(errs, fmt.Sprintf("%s (local): %v", b.Name, err))
+				errorColor.Fprintf(os.Stderr, "  ✗ Failed to delete %s (local): %v\n", b.Name, err)
+			} else {
+				successColor.Printf("  ✓ Deleted %s (local)\n", b.Name)
 				deleted++
+			}
+		}
+
+		// Delete remote branches in one batch push; fall back to individual on failure.
+		if len(remoteBranches) > 0 {
+			names := make([]string, len(remoteBranches))
+			for i, b := range remoteBranches {
+				names[i] = b.Name
+			}
+			if err := git.BatchDeleteRemoteBranches(repoPath, names); err != nil {
+				// Batch failed — retry individually for precise per-branch errors.
+				for _, b := range remoteBranches {
+					if err2 := git.BatchDeleteRemoteBranches(repoPath, []string{b.Name}); err2 != nil {
+						errs = append(errs, fmt.Sprintf("%s (remote): %v", b.Name, err2))
+						errorColor.Fprintf(os.Stderr, "  ✗ Failed to delete %s (remote): %v\n", b.Name, err2)
+					} else {
+						successColor.Printf("  ✓ Deleted %s (remote)\n", b.Name)
+						deleted++
+					}
+				}
+			} else {
+				for _, b := range remoteBranches {
+					successColor.Printf("  ✓ Deleted %s (remote)\n", b.Name)
+					deleted++
+				}
 			}
 		}
 
@@ -178,7 +224,7 @@ repository without cloning it yourself.`,
 }
 
 // loadBranchFile reads a CSV or JSON file produced by 'list --output' and
-// returns a slice of Branch values. Format is auto-detected from extension.
+// returns a slice of Branch values. Format is detected from the file extension.
 func loadBranchFile(path string) ([]git.Branch, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -186,10 +232,14 @@ func loadBranchFile(path string) ([]git.Branch, error) {
 	}
 	defer f.Close()
 
-	if strings.HasSuffix(path, ".json") {
+	switch {
+	case strings.HasSuffix(path, ".json"):
 		return loadBranchJSON(f)
+	case strings.HasSuffix(path, ".csv"):
+		return loadBranchCSV(f)
+	default:
+		return nil, fmt.Errorf("unsupported input file format for %q: must be .csv or .json", path)
 	}
-	return loadBranchCSV(f)
 }
 
 func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
@@ -236,7 +286,7 @@ func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
 			Name:       name,
 			IsRemote:   col(row, "type") == "remote",
 			MergedInto: col(row, "merged_into"),
-			ShortSHA:   col(row, "sha"),
+			SHA:        col(row, "sha"),
 		}
 		branches = append(branches, b)
 	}
@@ -268,7 +318,7 @@ func loadBranchJSON(r io.Reader) ([]git.Branch, error) {
 			Name:       jb.Name,
 			IsRemote:   jb.Type == "remote",
 			MergedInto: jb.MergedInto,
-			ShortSHA:   jb.SHA,
+			SHA:        jb.SHA,
 		})
 	}
 	return branches, nil
@@ -292,8 +342,10 @@ func printBranchTable(branches []git.Branch) {
 			mergedInto = b.MergedInto
 		}
 		sha := dimColor.Sprint("unknown")
-		if b.ShortSHA != "" {
-			sha = b.ShortSHA
+		if len(b.SHA) >= 7 {
+			sha = b.SHA[:7]
+		} else if b.SHA != "" {
+			sha = b.SHA
 		}
 		rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit, sha})
 	}
