@@ -2,7 +2,10 @@ package cmd
 
 import (
 	"bufio"
+	"encoding/csv"
+	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 
@@ -20,6 +23,7 @@ var (
 	pruneTarget    string
 	pruneSort      string
 	pruneJSON      bool
+	pruneInput     string // path to CSV or JSON file produced by list --output
 )
 
 var (
@@ -39,6 +43,10 @@ handles repos with multiple long-lived branches (hotfix/*, release/*, support/*)
 
 Use --target to narrow deletion to branches merged into a specific branch only.
 
+Use --input to supply a CSV or JSON file produced by 'list --output': only the
+branches listed in the file will be deleted. Edit the file first to remove any
+branches you want to keep.
+
 Note: prune does not support remote URLs. Use 'list <url>' to analyse a remote
 repository without cloning it yourself.`,
 	Args: cobra.MaximumNArgs(1),
@@ -54,38 +62,51 @@ repository without cloning it yourself.`,
 
 		currentBranch := git.CurrentBranch(repoPath)
 
-		branches, err := resolveBranches(pruneTarget, pruneRemote, git.SortField(pruneSort))
-		if err != nil {
-			return err
-		}
-		branches = git.FilterProtected(branches, protectedBranches)
-		branches = git.FilterByAge(branches, pruneOlderThan)
-		branches = git.FilterByTierHierarchy(branches, parseTiers())
-
-		var filterErr error
-		branches, filterErr = git.FilterByExcludeMergedInto(branches, excludeMergedInto)
-		if filterErr != nil {
-			return filterErr
-		}
-
-		// Separate out currently checked-out branch (git refuses to delete it)
-		var skipped []git.Branch
 		var deletable []git.Branch
-		for _, b := range branches {
-			if !b.IsRemote && b.Name == currentBranch {
-				skipped = append(skipped, b)
-			} else {
-				deletable = append(deletable, b)
-			}
-		}
 
-		if len(skipped) > 0 {
-			warnColor.Fprintf(os.Stderr, "⚠ Skipping currently checked-out branch: %s\n\n", skipped[0].Name)
+		if pruneInput != "" {
+			// Load branches from file instead of running git analysis.
+			loaded, err := loadBranchFile(pruneInput)
+			if err != nil {
+				return err
+			}
+			// Still skip the currently checked-out branch.
+			for _, b := range loaded {
+				if !b.IsRemote && b.Name == currentBranch {
+					warnColor.Fprintf(os.Stderr, "⚠ Skipping currently checked-out branch: %s\n\n", b.Name)
+				} else {
+					deletable = append(deletable, b)
+				}
+			}
+		} else {
+			branches, err := resolveBranches(pruneTarget, pruneRemote, git.SortField(pruneSort))
+			if err != nil {
+				return err
+			}
+			branches = git.FilterProtected(branches, protectedBranches)
+			branches = git.FilterByAge(branches, pruneOlderThan)
+			branches = git.FilterByTierHierarchy(branches, parseTiers())
+
+			var filterErr error
+			branches, filterErr = git.FilterByExcludeMergedInto(branches, excludeMergedInto)
+			if filterErr != nil {
+				return filterErr
+			}
+
+			for _, b := range branches {
+				if !b.IsRemote && b.Name == currentBranch {
+					warnColor.Fprintf(os.Stderr, "⚠ Skipping currently checked-out branch: %s\n\n", b.Name)
+				} else {
+					deletable = append(deletable, b)
+				}
+			}
 		}
 
 		if len(deletable) == 0 {
 			fmt.Print("No merged branches found")
-			fmt.Print(filterSuffix(pruneTarget, pruneOlderThan, pruneRemote))
+			if pruneInput == "" {
+				fmt.Print(filterSuffix(pruneTarget, pruneOlderThan, pruneRemote))
+			}
 			fmt.Println(".")
 			return nil
 		}
@@ -151,6 +172,79 @@ repository without cloning it yourself.`,
 	},
 }
 
+// loadBranchFile reads a CSV or JSON file produced by 'list --output' and
+// returns a slice of Branch values. Format is auto-detected from extension.
+func loadBranchFile(path string) ([]git.Branch, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("opening input file: %w", err)
+	}
+	defer f.Close()
+
+	if strings.HasSuffix(path, ".json") {
+		return loadBranchJSON(f)
+	}
+	return loadBranchCSV(f)
+}
+
+func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
+	cr := csv.NewReader(r)
+	records, err := cr.ReadAll()
+	if err != nil {
+		return nil, fmt.Errorf("parsing CSV: %w", err)
+	}
+	if len(records) < 2 {
+		return nil, nil
+	}
+	// Build column index from header row so the file is order-independent.
+	header := records[0]
+	idx := make(map[string]int, len(header))
+	for i, h := range header {
+		idx[h] = i
+	}
+	col := func(row []string, name string) string {
+		if i, ok := idx[name]; ok && i < len(row) {
+			return row[i]
+		}
+		return ""
+	}
+	var branches []git.Branch
+	for _, row := range records[1:] {
+		name := col(row, "name")
+		if name == "" {
+			continue
+		}
+		b := git.Branch{
+			Name:       name,
+			IsRemote:   col(row, "type") == "remote",
+			MergedInto: col(row, "merged_into"),
+			ShortSHA:   col(row, "sha"),
+		}
+		branches = append(branches, b)
+	}
+	return branches, nil
+}
+
+func loadBranchJSON(r io.Reader) ([]git.Branch, error) {
+	var records []jsonBranch
+	if err := json.NewDecoder(r).Decode(&records); err != nil {
+		return nil, fmt.Errorf("parsing JSON: %w", err)
+	}
+	var branches []git.Branch
+	for _, jb := range records {
+		if jb.Name == "" {
+			continue
+		}
+		branches = append(branches, git.Branch{
+			Name:       jb.Name,
+			IsRemote:   jb.Type == "remote",
+			MergedInto: jb.MergedInto,
+			ShortSHA:   jb.SHA,
+		})
+	}
+	return branches, nil
+}
+
 func printBranchTable(branches []git.Branch) {
 	var rows [][]string
 	for _, b := range branches {
@@ -185,5 +279,6 @@ func init() {
 	pruneCmd.Flags().StringVar(&pruneTarget, "target", "", "narrow to branches merged into this specific branch only")
 	pruneCmd.Flags().StringVar(&pruneSort, "sort", "age", "sort order: age (oldest first) or name")
 	pruneCmd.Flags().BoolVar(&pruneJSON, "json", false, "output candidate list as JSON without deleting anything")
+	pruneCmd.Flags().StringVar(&pruneInput, "input", "", "CSV or JSON file from 'list --output'; delete exactly these branches")
 	rootCmd.AddCommand(pruneCmd)
 }
