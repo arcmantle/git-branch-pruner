@@ -168,9 +168,13 @@ func printBranchTable(branches []git.Branch) {
 		if b.MergedInto != "" {
 			mergedInto = b.MergedInto
 		}
-		rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit})
+		sha := dimColor.Sprint("unknown")
+		if b.ShortSHA != "" {
+			sha = b.ShortSHA
+		}
+		rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit, sha})
 	}
-	printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT"}, rows)
+	printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
 }
 
 func init() {

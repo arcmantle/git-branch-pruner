@@ -80,9 +80,13 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 			if b.MergedInto != "" {
 				mergedInto = b.MergedInto
 			}
-			rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit})
+			sha := dimColor.Sprint("unknown")
+			if b.ShortSHA != "" {
+				sha = b.ShortSHA
+			}
+			rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit, sha})
 		}
-		printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT"}, rows)
+		printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
 
 		fmt.Printf("\n%d branch(es) found", len(branches))
 		fmt.Print(filterSuffix(listTarget, listOlderThan, includeRemote))

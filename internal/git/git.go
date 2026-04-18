@@ -23,6 +23,7 @@ type Branch struct {
 	AgeDays     int
 	RelativeAge string
 	MergedInto  string // the branch this was found merged into; used for deletion verification
+	ShortSHA    string // 7-char abbreviated tip commit hash
 }
 
 // SortField controls how branches are sorted.
@@ -362,24 +363,29 @@ return c
 return containers[0]
 }
 
-// enrichAge fills in LastCommit, AgeDays, and RelativeAge for a branch.
+// enrichAge fills in LastCommit, AgeDays, RelativeAge, and ShortSHA for a branch.
 func enrichAge(repoPath string, b *Branch) {
 	ref := b.Name
 	if b.IsRemote {
 		ref = "origin/" + b.Name
 	}
-	out, err := runGit(repoPath, "log", "-1", "--format=%ct", ref)
+	out, err := runGit(repoPath, "log", "-1", "--format=%ct %h", ref)
 	if err != nil || out == "" {
 		return
 	}
-	ts, err := strconv.ParseInt(out, 10, 64)
-	if err != nil {
-		return
+	fields := strings.Fields(out)
+	if len(fields) >= 1 {
+		ts, err := strconv.ParseInt(fields[0], 10, 64)
+		if err == nil {
+			commitTime := time.Unix(ts, 0)
+			b.LastCommit = commitTime
+			b.AgeDays = int(time.Since(commitTime).Hours() / 24)
+			b.RelativeAge = relativeTime(commitTime)
+		}
 	}
-	commitTime := time.Unix(ts, 0)
-	b.LastCommit = commitTime
-	b.AgeDays = int(time.Since(commitTime).Hours() / 24)
-	b.RelativeAge = relativeTime(commitTime)
+	if len(fields) >= 2 {
+		b.ShortSHA = fields[1]
+	}
 }
 
 // relativeTime returns a human-readable relative time string (e.g. "3 months ago").

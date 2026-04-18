@@ -27,38 +27,21 @@ func terminalWidth() int {
 	return 120
 }
 
-// wrapColumn breaks s into lines of at most width characters.
-// Prefers to break on word boundaries (-, /, _) when close to the limit.
-func wrapColumn(s string, width int) []string {
-	if width <= 0 || len(s) <= width {
-		return []string{s}
+// truncate shortens s to at most maxLen visible characters, appending "…" if cut.
+func truncate(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
 	}
-	var lines []string
-	for len(s) > width {
-		cut := width
-		// Search backwards for a natural break point (-, /, _) within the last 15 chars.
-		for i := width - 1; i >= width-15 && i > 0; i-- {
-			if s[i] == '-' || s[i] == '/' || s[i] == '_' {
-				cut = i + 1 // include the separator on the current line
-				break
-			}
-		}
-		lines = append(lines, s[:cut])
-		s = s[cut:]
-	}
-	if len(s) > 0 {
-		lines = append(lines, s)
-	}
-	return lines
+	return s[:maxLen-1] + "…"
 }
 
 // printTable prints headers and rows with automatic column alignment.
-// The first column (BRANCH) is capped to maxBranchCol or the terminal width
-// (whichever is smaller); names longer than the cap wrap onto continuation rows.
+// The first column (BRANCH) is capped to maxBranchCol; longer names are truncated
+// with an ellipsis. The cap also respects the terminal width as a lower bound.
 func printTable(headers []string, rows [][]string) {
 	const colPad = 2
 	const minBranchCol = 20
-	const maxBranchCol = 80
+	const maxBranchCol = 70
 	n := len(headers)
 
 	// Compute natural widths from data (ignoring ANSI).
@@ -101,28 +84,16 @@ func printTable(headers []string, rows [][]string) {
 		}
 	}
 
-	// Print data rows, wrapping column 0 if needed.
+	// Print data rows, truncating column 0 if needed.
 	for _, row := range rows {
-		var col0 string
-		if len(row) > 0 {
-			col0 = row[0]
-		}
-		branchLines := wrapColumn(col0, widths[0])
-		for li, segment := range branchLines {
-			if li == 0 {
-				// First line: branch segment + remaining columns.
-				fmt.Print(segment + strings.Repeat(" ", widths[0]+colPad-visibleLen(segment)))
-				for j := 1; j < n && j < len(row); j++ {
-					cell := row[j]
-					if j < n-1 {
-						fmt.Print(cell + strings.Repeat(" ", widths[j]+colPad-visibleLen(cell)))
-					} else {
-						fmt.Println(cell)
-					}
-				}
+		for j, cell := range row {
+			if j == 0 {
+				cell = truncate(cell, widths[0])
+			}
+			if j < n-1 {
+				fmt.Print(cell + strings.Repeat(" ", widths[j]+colPad-visibleLen(cell)))
 			} else {
-				// Continuation line: indented branch segment only.
-				fmt.Println("  " + segment)
+				fmt.Println(cell)
 			}
 		}
 	}
