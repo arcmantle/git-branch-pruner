@@ -53,11 +53,12 @@ func wrapColumn(s string, width int) []string {
 }
 
 // printTable prints headers and rows with automatic column alignment.
-// The first column (BRANCH) is capped so the table fits within the terminal
-// width; names longer than the cap wrap onto continuation rows.
+// The first column (BRANCH) is capped to maxBranchCol or the terminal width
+// (whichever is smaller); names longer than the cap wrap onto continuation rows.
 func printTable(headers []string, rows [][]string) {
 	const colPad = 2
 	const minBranchCol = 20
+	const maxBranchCol = 60
 	n := len(headers)
 
 	// Compute natural widths from data (ignoring ANSI).
@@ -73,18 +74,21 @@ func printTable(headers []string, rows [][]string) {
 		}
 	}
 
-	// Cap column 0 so the full row fits in the terminal.
-	// otherWidth = sum of all non-first columns + their padding + first col padding.
+	// Cap column 0: never exceed maxBranchCol, and also never overflow the terminal.
 	otherWidth := 0
 	for i := 1; i < n; i++ {
 		otherWidth += widths[i] + colPad
 	}
-	maxBranchCol := terminalWidth() - otherWidth - colPad
-	if maxBranchCol < minBranchCol {
-		maxBranchCol = minBranchCol
+	termCap := terminalWidth() - otherWidth - colPad
+	if termCap < minBranchCol {
+		termCap = minBranchCol
 	}
-	if widths[0] > maxBranchCol {
-		widths[0] = maxBranchCol
+	cap0 := maxBranchCol
+	if termCap < cap0 {
+		cap0 = termCap
+	}
+	if widths[0] > cap0 {
+		widths[0] = cap0
 	}
 
 	// Print header row.
