@@ -56,6 +56,9 @@ repository without cloning it yourself.`,
 		if isBareClone {
 			return fmt.Errorf("prune is not supported for remote URLs — use 'list <url>' to analyse a remote repository")
 		}
+		if len(args) > 0 {
+			return fmt.Errorf("prune does not accept positional arguments (got %q); use --target to specify a branch", args[0])
+		}
 		if err := git.ValidateSortField(pruneSort); err != nil {
 			return err
 		}
@@ -65,7 +68,7 @@ repository without cloning it yourself.`,
 			pruneDryRun = true
 		}
 
-		currentBranch := git.CurrentBranch(repoPath)
+		currentBranch := git.CurrentBranch(cmdCtx, repoPath)
 
 		var deletable []git.Branch
 
@@ -102,7 +105,7 @@ repository without cloning it yourself.`,
 
 			// Warn if the file's remote URL doesn't match the current repo.
 			if fileURL := meta["remote_url"]; fileURL != "" {
-				if currentURL := git.RemoteURL(repoPath); currentURL != "" && currentURL != fileURL {
+				if currentURL := git.RemoteURL(cmdCtx, repoPath); currentURL != "" && currentURL != fileURL {
 					warnColor.Fprintf(color.Error, "⚠ Input file was generated for %s but current repo remote is %s\n\n", fileURL, currentURL)
 				}
 			}
@@ -202,7 +205,7 @@ repository without cloning it yourself.`,
 		var localBranches []git.Branch
 		var remoteBranches []git.Branch
 		for _, b := range deletable {
-			if err := git.VerifyMerged(repoPath, b, fpc); err != nil {
+			if err := git.VerifyMerged(cmdCtx, repoPath, b, fpc); err != nil {
 				bType := "local"
 				if b.IsRemote {
 					bType = "remote"
@@ -218,7 +221,7 @@ repository without cloning it yourself.`,
 
 		// Delete local branches one by one.
 		for _, b := range localBranches {
-			if err := git.DeleteLocalBranch(repoPath, b); err != nil {
+			if err := git.DeleteLocalBranch(cmdCtx, repoPath, b); err != nil {
 				errs = append(errs, fmt.Sprintf("%s (local): %v", b.Name, err))
 				errorColor.Fprintf(color.Error, "  ✗ Failed to delete %s (local): %v\n", b.Name, err)
 			} else {
@@ -233,12 +236,12 @@ repository without cloning it yourself.`,
 			for i, b := range remoteBranches {
 				names[i] = b.Name
 			}
-			if err := git.BatchDeleteRemoteBranches(repoPath, names); err != nil {
+			if err := git.BatchDeleteRemoteBranches(cmdCtx, repoPath, names); err != nil {
 				// Batch failed — retry individually for precise per-branch errors.
 				// If a branch was already deleted in the (partially successful) batch,
 				// git reports "remote ref does not exist" — treat that as success.
 				for _, b := range remoteBranches {
-					if err2 := git.BatchDeleteRemoteBranches(repoPath, []string{b.Name}); err2 != nil {
+					if err2 := git.BatchDeleteRemoteBranches(cmdCtx, repoPath, []string{b.Name}); err2 != nil {
 						errMsg := err2.Error()
 						if strings.Contains(errMsg, "remote ref does not exist") ||
 							strings.Contains(errMsg, "could not find remote ref") {
@@ -434,6 +437,13 @@ func loadBranchJSON(r io.Reader) ([]git.Branch, map[string]string, error) {
 }
 
 func printBranchTable(branches []git.Branch) {
+	hasAuthor := false
+	for _, b := range branches {
+		if b.Author != "" {
+			hasAuthor = true
+			break
+		}
+	}
 	var rows [][]string
 	for _, b := range branches {
 		bType := "local"
@@ -456,9 +466,21 @@ func printBranchTable(branches []git.Branch) {
 		} else if b.SHA != "" {
 			sha = b.SHA
 		}
-		rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit, sha})
+		row := []string{b.Name, bType, mergedInto, relAge, lastCommit, sha}
+		if hasAuthor {
+			author := b.Author
+			if author == "" {
+				author = dimColor.Sprint("unknown")
+			}
+			row = append(row, author)
+		}
+		rows = append(rows, row)
 	}
-	printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
+	headers := []string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}
+	if hasAuthor {
+		headers = append(headers, "AUTHOR")
+	}
+	printTable(headers, rows)
 }
 
 func init() {

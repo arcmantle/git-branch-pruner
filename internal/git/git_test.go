@@ -1,6 +1,7 @@
 package git
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -290,6 +291,20 @@ func TestFilterByExcludeMergedInto_Anchored(t *testing.T) {
 		if b.MergedInto == "main" {
 			t.Errorf("branch merged into 'main' should have been excluded")
 		}
+	}
+}
+
+func TestFilterByExcludeMergedInto_RejectsGroupBreakingPattern(t *testing.T) {
+	// A pattern like "a)|(b" is invalid standalone but would compile when
+	// wrapped in "^(?:...)$", breaking the auto-anchoring. The standalone
+	// validation should catch and reject it.
+	branches := []Branch{makeBranch("feature/a", "main")}
+	_, err := FilterByExcludeMergedInto(branches, []string{"a)|(b"})
+	if err == nil {
+		t.Fatal("expected error for group-breaking regex pattern, got nil")
+	}
+	if !strings.Contains(err.Error(), "invalid --exclude-merged-into pattern") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 

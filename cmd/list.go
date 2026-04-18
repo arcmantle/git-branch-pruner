@@ -46,6 +46,9 @@ A remote URL can be passed as an argument — the repository will be cloned
 automatically (blobless bare clone) and cleaned up after the command finishes.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) (retErr error) {
+		if len(args) > 0 && !isBareClone {
+			return fmt.Errorf("list does not accept positional arguments (got %q); use --target to specify a branch, or pass a URL to analyse a remote repository", args[0])
+		}
 		if err := git.ValidateSortField(listSort); err != nil {
 			return err
 		}
@@ -80,7 +83,7 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 
 		if listAuthors && len(branches) > 0 {
 			fmt.Fprint(os.Stderr, "Fetching branch authors...\n")
-			git.EnrichAuthors(repoPath, branches)
+			git.EnrichAuthors(cmdCtx, repoPath, branches)
 		}
 
 		// When writing to a file, disable color in the output.
@@ -157,6 +160,11 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 func resolveOutput(path string) (io.Writer, func() error, error) {
 	if path == "" {
 		return os.Stdout, func() error { return nil }, nil
+	}
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, nil, fmt.Errorf("creating output directory: %w", err)
+		}
 	}
 	f, err := os.Create(path)
 	if err != nil {
@@ -295,7 +303,7 @@ func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error 
 	// (comment='#') and other CSV parsers can strip them cleanly.
 	// Skipped by loadBranchCSV as well.
 	if r := meta["remote_url"]; r != "" {
-		fmt.Fprintf(w, "# remote_url: %s\n", r)
+		fmt.Fprintf(w, "# remote_url: %s\n", strings.ReplaceAll(strings.ReplaceAll(r, "\n", ""), "\r", ""))
 	}
 	fmt.Fprintf(w, "# generated: %s\n", meta["generated"])
 
@@ -345,7 +353,7 @@ func buildMeta() map[string]string {
 		"repo":      repo,
 		"generated": time.Now().UTC().Format(time.RFC3339),
 	}
-	if remote := git.RemoteURL(repoPath); remote != "" {
+	if remote := git.RemoteURL(cmdCtx, repoPath); remote != "" {
 		m["remote_url"] = remote
 	}
 	return m

@@ -2,6 +2,7 @@ package git
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -39,8 +40,9 @@ const (
 
 // runGit executes a git command in the given directory and returns trimmed stdout.
 // Stderr is captured separately so it never bleeds into parsed output.
-func runGit(repoPath string, args ...string) (string, error) {
-	cmd := exec.Command("git", args...)
+// The command is cancelled when ctx is done, killing the child process.
+func runGit(ctx context.Context, repoPath string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
 	if repoPath != "" {
 		cmd.Dir = repoPath
 	}
@@ -56,14 +58,14 @@ func runGit(repoPath string, args ...string) (string, error) {
 		if msg == "" {
 			return "", fmt.Errorf("git %s: %w", args[0], err)
 		}
-		return "", fmt.Errorf("%s", msg)
+		return "", fmt.Errorf("%s: %w", msg, err)
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
 
 // ValidateRepo checks that repoPath (or the cwd if empty) is inside a git repository.
-func ValidateRepo(repoPath string) error {
-	_, err := runGit(repoPath, "rev-parse", "--git-dir")
+func ValidateRepo(ctx context.Context, repoPath string) error {
+	_, err := runGit(ctx, repoPath, "rev-parse", "--git-dir")
 	if err != nil {
 		dir := repoPath
 		if dir == "" {
@@ -78,15 +80,15 @@ func ValidateRepo(repoPath string) error {
 // --filter=tree:0 downloads only commit objects (no trees, no blobs) which is
 // sufficient for all ancestry queries this tool performs (branch --contains,
 // merge-base --is-ancestor, log --format). Much faster than blobless on large repos.
-func CloneForAnalysis(url, destDir string) error {
-	cmd := exec.Command("git", "clone", "--bare", "--filter=tree:0", "--progress", "--", url, destDir)
+func CloneForAnalysis(ctx context.Context, url, destDir string) error {
+	cmd := exec.CommandContext(ctx, "git", "clone", "--bare", "--filter=tree:0", "--progress", "--", url, destDir)
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
 
 // RemoteURL returns the fetch URL for the origin remote, or "" if not set.
-func RemoteURL(repoPath string) string {
-	out, err := runGit(repoPath, "remote", "get-url", "origin")
+func RemoteURL(ctx context.Context, repoPath string) string {
+	out, err := runGit(ctx, repoPath, "remote", "get-url", "origin")
 	if err != nil {
 		return ""
 	}
@@ -94,43 +96,23 @@ func RemoteURL(repoPath string) string {
 }
 
 // CurrentBranch returns the name of the currently checked-out branch.
-func CurrentBranch(repoPath string) string {
-	out, err := runGit(repoPath, "symbolic-ref", "--short", "HEAD")
+func CurrentBranch(ctx context.Context, repoPath string) string {
+	out, err := runGit(ctx, repoPath, "symbolic-ref", "--short", "HEAD")
 	if err != nil {
 		return ""
 	}
 	return out
 }
 
-// DefaultBranch returns the name of the default branch (main/master).
-func DefaultBranch(repoPath string) (string, error) {
-	// Try symbolic-ref for the remote HEAD
-	out, err := runGit(repoPath, "symbolic-ref", "refs/remotes/origin/HEAD", "--short")
-	if err == nil {
-		parts := strings.SplitN(out, "/", 2)
-		if len(parts) == 2 {
-			return parts[1], nil
-		}
-		return out, nil
-	}
-	// Fallback: check if main or master exists
-	for _, name := range []string{"main", "master"} {
-		if _, err := runGit(repoPath, "rev-parse", "--verify", name); err == nil {
-			return name, nil
-		}
-	}
-	return "", fmt.Errorf("could not determine default branch")
-}
-
 // MergedBranches returns branches that have been merged into targetBranch.
 // Each returned branch has MergedInto set to targetBranch.
-func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy SortField) ([]Branch, error) {
+func MergedBranches(ctx context.Context, repoPath, targetBranch string, includeRemote bool, sortBy SortField) ([]Branch, error) {
 	var branches []Branch
 
 	// Local merged branches
 	// Use --merged=<value> (not --merged <value>) so a "-"-prefixed target
 	// cannot be misinterpreted as a git flag.
-	localOut, err := runGit(repoPath, "branch", "--merged="+targetBranch, "--format=%(refname:short)")
+	localOut, err := runGit(ctx, repoPath, "branch", "--merged="+targetBranch, "--format=%(refname:short)")
 	if err != nil {
 		return nil, fmt.Errorf("listing local merged branches: %w", err)
 	}
@@ -143,7 +125,7 @@ func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy So
 
 	// Remote merged branches
 	if includeRemote {
-		remoteOut, err := runGit(repoPath, "branch", "-r", "--merged="+targetBranch, "--format=%(refname:short)")
+		remoteOut, err := runGit(ctx, repoPath, "branch", "-r", "--merged="+targetBranch, "--format=%(refname:short)")
 		if err != nil {
 			return nil, fmt.Errorf("listing remote merged branches: %w", err)
 		}
@@ -160,7 +142,7 @@ func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy So
 	}
 
 	for i := range branches {
-		enrichAge(repoPath, &branches[i])
+		enrichAge(ctx, repoPath, &branches[i])
 	}
 	sortBranches(branches, sortBy)
 	return branches, nil
@@ -170,7 +152,7 @@ func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy So
 // at least one OTHER existing branch, regardless of which branch that is.
 // This correctly handles repos with multiple long-lived branches (hotfix/*, release/*, etc.)
 // where feature branches may be merged back into any of them.
-func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortField) ([]Branch, error) {
+func MergedBranchesAnywhere(ctx context.Context, repoPath string, includeRemote bool, sortBy SortField) ([]Branch, error) {
 	type ref struct {
 		idx      int
 		name     string
@@ -180,7 +162,7 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 
 	var allRefs []ref
 
-	localOut, err := runGit(repoPath, "branch", "--format=%(refname:short) %(objectname)")
+	localOut, err := runGit(ctx, repoPath, "branch", "--format=%(refname:short) %(objectname)")
 	if err != nil {
 		return nil, err
 	}
@@ -192,7 +174,7 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 	}
 
 	if includeRemote {
-		remoteOut, err := runGit(repoPath, "branch", "-r", "--format=%(refname:short) %(objectname)")
+		remoteOut, err := runGit(ctx, repoPath, "branch", "-r", "--format=%(refname:short) %(objectname)")
 		if err != nil {
 			return nil, err
 		}
@@ -243,9 +225,9 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 		go func() {
 			defer wg.Done()
 			for r := range jobs {
-				mergedInto := findContainer(repoPath, r.name, r.tip, false, fpc)
+				mergedInto := findContainer(ctx, repoPath, r.name, r.tip, false, fpc)
 				if mergedInto == "" && includeRemote {
-					mergedInto = findContainer(repoPath, r.name, r.tip, true, fpc)
+					mergedInto = findContainer(ctx, repoPath, r.name, r.tip, true, fpc)
 				}
 				if mergedInto != "" {
 					results[r.idx] = result{
@@ -289,7 +271,7 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 		go func() {
 			defer enrichWg.Done()
 			for i := range enrichJobs {
-				enrichAge(repoPath, &candidates[i])
+				enrichAge(ctx, repoPath, &candidates[i])
 			}
 		}()
 	}
@@ -335,7 +317,7 @@ func NewFirstParentCache() *FirstParentCache {
 // isTrivialAncestor returns true if tip is on the first-parent path of container.
 // The first-parent list is computed exactly once per container via sync.Once,
 // preventing redundant rev-list calls when multiple goroutines query the same container.
-func (c *firstParentCache) isTrivialAncestor(repoPath, tip, container string) bool {
+func (c *firstParentCache) isTrivialAncestor(ctx context.Context, repoPath, tip, container string) bool {
 	c.mu.Lock()
 	entry, ok := c.cache[container]
 	if !ok {
@@ -345,7 +327,7 @@ func (c *firstParentCache) isTrivialAncestor(repoPath, tip, container string) bo
 	c.mu.Unlock()
 
 	entry.once.Do(func() {
-		out, err := runGit(repoPath, "rev-list", "--first-parent", container)
+		out, err := runGit(ctx, repoPath, "rev-list", "--first-parent", container)
 		entry.shas = make(map[string]bool)
 		if err == nil {
 			for _, line := range splitLines(out) {
@@ -366,14 +348,14 @@ var preferredBases = []string{"main", "master", "develop", "development", "trunk
 // that contains the given tip commit via a real merge (not trivial ancestry).
 // Prefers well-known base branches over incidental containers.
 // Returns "" if no valid container is found.
-func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstParentCache) string {
+func findContainer(ctx context.Context, repoPath, branchName, tip string, remote bool, fpc *firstParentCache) string {
 	var args []string
 	if remote {
 		args = []string{"branch", "-r", "--contains", tip, "--format=%(refname:short)"}
 	} else {
 		args = []string{"branch", "--contains", tip, "--format=%(refname:short)"}
 	}
-	out, err := runGit(repoPath, args...)
+	out, err := runGit(ctx, repoPath, args...)
 	if err != nil {
 		return ""
 	}
@@ -392,7 +374,7 @@ func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstPare
 		if remote {
 			ancestorRef = "origin/" + shortC
 		}
-		if fpc.isTrivialAncestor(repoPath, tip, ancestorRef) {
+		if fpc.isTrivialAncestor(ctx, repoPath, tip, ancestorRef) {
 			continue
 		}
 		containers = append(containers, shortC)
@@ -423,12 +405,12 @@ func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstPare
 }
 
 // enrichAge fills in LastCommit, AgeDays, RelativeAge, and SHA for a branch.
-func enrichAge(repoPath string, b *Branch) {
+func enrichAge(ctx context.Context, repoPath string, b *Branch) {
 	ref := b.Name
 	if b.IsRemote {
 		ref = "origin/" + b.Name
 	}
-	out, err := runGit(repoPath, "log", "-1", "--format=%ct %H", ref)
+	out, err := runGit(ctx, repoPath, "log", "-1", "--format=%ct %H", ref)
 	if err != nil || out == "" {
 		return
 	}
@@ -450,7 +432,7 @@ func enrichAge(repoPath string, b *Branch) {
 // EnrichAuthors populates the Author field for each branch using the first commit
 // that is unique to that branch (via --ancestry-path from the merge-base with MergedInto).
 // Runs in parallel using the same worker pool pattern as MergedBranchesAnywhere.
-func EnrichAuthors(repoPath string, branches []Branch) {
+func EnrichAuthors(ctx context.Context, repoPath string, branches []Branch) {
 	workers := runtime.NumCPU()
 	if workers > 8 {
 		workers = 8
@@ -462,7 +444,7 @@ func EnrichAuthors(repoPath string, branches []Branch) {
 		go func() {
 			defer wg.Done()
 			for i := range jobs {
-				branches[i].Author = firstBranchAuthor(repoPath, &branches[i])
+				branches[i].Author = firstBranchAuthor(ctx, repoPath, &branches[i])
 			}
 		}()
 	}
@@ -483,7 +465,7 @@ func EnrichAuthors(repoPath string, branches []Branch) {
 // (merge-base == tip), making the log range empty.  In that case we fall back to the
 // tip commit's author, which is the most recent person to work on the branch and a
 // reliable proxy for ownership.
-func firstBranchAuthor(repoPath string, b *Branch) string {
+func firstBranchAuthor(ctx context.Context, repoPath string, b *Branch) string {
 	if b.SHA == "" {
 		return ""
 	}
@@ -492,12 +474,12 @@ func firstBranchAuthor(repoPath string, b *Branch) string {
 		base = "HEAD"
 	}
 
-	mergeBase, err := runGit(repoPath, "merge-base", b.SHA, base)
+	mergeBase, err := runGit(ctx, repoPath, "merge-base", b.SHA, base)
 	if err == nil && mergeBase != "" {
 		if mergeBase != b.SHA {
 			// Tip is not directly in the target's history (squash / rebase merge).
 			// Walk the branch-unique commits in chronological order and take the first.
-			out, logErr := runGit(repoPath, "log", "--ancestry-path", "--reverse",
+			out, logErr := runGit(ctx, repoPath, "log", "--ancestry-path", "--reverse",
 				"--format=%an", mergeBase+".."+b.SHA)
 			if logErr == nil && out != "" {
 				return strings.SplitN(out, "\n", 2)[0]
@@ -506,7 +488,7 @@ func firstBranchAuthor(repoPath string, b *Branch) string {
 	}
 
 	// Fallback (regular merge commit, or any error above): author of the tip commit.
-	out, err := runGit(repoPath, "log", "-1", "--format=%an", b.SHA)
+	out, err := runGit(ctx, repoPath, "log", "-1", "--format=%an", b.SHA)
 	if err != nil {
 		return ""
 	}
@@ -586,6 +568,12 @@ func FilterByExcludeMergedInto(branches []Branch, patterns []string) ([]Branch, 
 	}
 	compiled := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
+		// Validate the pattern compiles on its own before wrapping with anchors.
+		// This prevents patterns like "a)|(b" which are invalid standalone but
+		// become valid (with broken anchoring) when wrapped in "^(?:...)$".
+		if _, err := regexp.Compile(p); err != nil {
+			return nil, fmt.Errorf("invalid --exclude-merged-into pattern %q: %w", p, err)
+		}
 		// Auto-anchor so that "main" doesn't match "domain" or "mainline".
 		re, err := regexp.Compile("^(?:" + p + ")$")
 		if err != nil {
@@ -744,17 +732,17 @@ func FilterByTierHierarchy(branches []Branch, tiers [][]string) []Branch {
 
 // VerifyMerged checks that b is still merged (into b.MergedInto, or anywhere if empty)
 // without deleting it. Use this to pre-validate remote branches before a batch push.
-func VerifyMerged(repoPath string, b Branch, fpc *FirstParentCache) error {
+func VerifyMerged(ctx context.Context, repoPath string, b Branch, fpc *FirstParentCache) error {
 	if b.MergedInto != "" {
-		return assertMergedInto(repoPath, b, b.MergedInto)
+		return assertMergedInto(ctx, repoPath, b, b.MergedInto)
 	}
-	return assertMergedAnywhereWithCache(repoPath, b, fpc)
+	return assertMergedAnywhereWithCache(ctx, repoPath, b, fpc)
 }
 
 // DeleteLocalBranch deletes a local branch using -d (safe delete).
 // Git's own merge check provides a second safety net on top of VerifyMerged.
-func DeleteLocalBranch(repoPath string, b Branch) error {
-	_, err := runGit(repoPath, "branch", "-d", "--", b.Name)
+func DeleteLocalBranch(ctx context.Context, repoPath string, b Branch) error {
+	_, err := runGit(ctx, repoPath, "branch", "-d", "--", b.Name)
 	return err
 }
 
@@ -762,45 +750,43 @@ func DeleteLocalBranch(repoPath string, b Branch) error {
 // "git push origin --delete" call, which is much faster than one call per branch.
 // Returns an error if the push fails; on failure the caller should fall back to
 // individual deletions to identify which specific branches could not be removed.
-func BatchDeleteRemoteBranches(repoPath string, names []string) error {
+func BatchDeleteRemoteBranches(ctx context.Context, repoPath string, names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
 	args := []string{"push", "origin", "--delete", "--"}
 	args = append(args, names...)
-	_, err := runGit(repoPath, args...)
+	_, err := runGit(ctx, repoPath, args...)
 	return err
 }
 
 // assertMergedInto verifies the branch tip is reachable from target.
-func assertMergedInto(repoPath string, b Branch, target string) error {
+func assertMergedInto(ctx context.Context, repoPath string, b Branch, target string) error {
 	ref := b.Name
 	if b.IsRemote {
 		ref = "origin/" + b.Name
 	}
-	_, err := runGit(repoPath, "merge-base", "--is-ancestor", "--", ref, target)
+	_, err := runGit(ctx, repoPath, "merge-base", "--is-ancestor", "--", ref, target)
 	if err != nil {
 		return fmt.Errorf("branch %q is not fully merged into %s — refusing to delete", b.Name, target)
 	}
 	return nil
 }
 
-func assertMergedAnywhereWithCache(repoPath string, b Branch, fpc *firstParentCache) error {
+func assertMergedAnywhereWithCache(ctx context.Context, repoPath string, b Branch, fpc *firstParentCache) error {
 	ref := b.Name
 	if b.IsRemote {
 		ref = "origin/" + b.Name
 	}
-	tip, err := runGit(repoPath, "rev-parse", ref)
+	tip, err := runGit(ctx, repoPath, "rev-parse", ref)
 	if err != nil {
 		return fmt.Errorf("could not resolve %q: %w", b.Name, err)
 	}
-	if container := findContainer(repoPath, b.Name, tip, false, fpc); container != "" {
+	if container := findContainer(ctx, repoPath, b.Name, tip, false, fpc); container != "" {
 		return nil
 	}
-	if b.IsRemote {
-		if container := findContainer(repoPath, b.Name, tip, true, fpc); container != "" {
-			return nil
-		}
+	if container := findContainer(ctx, repoPath, b.Name, tip, true, fpc); container != "" {
+		return nil
 	}
 	return fmt.Errorf("branch %q is no longer merged into any other branch — refusing to delete", b.Name)
 }

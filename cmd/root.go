@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/signal"
 	"regexp"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"syscall"
 	"unicode/utf8"
 
@@ -147,7 +149,10 @@ var (
 	tierPatterns      []string // raw --tier values; parsed into tiers [][]string at use
 	tiersShorthand    string   // raw --tiers value; e.g. "main,master <- release/* <- hotfix/*"
 	isBareClone       bool
+	cleanupMu         sync.Mutex
 	cleanupFns        []func()
+	cmdCtx            context.Context    // cancelled on SIGINT/SIGTERM
+	cmdCancel         context.CancelFunc // call before cleanup to kill child git processes
 )
 
 var rootCmd = &cobra.Command{
@@ -196,33 +201,47 @@ var rootCmd = &cobra.Command{
 			if err != nil {
 				return fmt.Errorf("creating temp dir: %w", err)
 			}
+			cleanupMu.Lock()
 			cleanupFns = append(cleanupFns, func() { os.RemoveAll(tmpDir) })
+			cleanupMu.Unlock()
 			fmt.Fprintf(os.Stderr, "Cloning %s ...\n", url)
-			if err := git.CloneForAnalysis(url, tmpDir); err != nil {
+			if err := git.CloneForAnalysis(cmdCtx, url, tmpDir); err != nil {
 				return fmt.Errorf("cloning repository: %w", err)
 			}
 			repoPath = tmpDir
 			isBareClone = true
 			return nil
 		}
-		return git.ValidateRepo(repoPath)
+		return git.ValidateRepo(cmdCtx, repoPath)
 	},
 }
 
 func Execute() {
+	cmdCtx, cmdCancel = context.WithCancel(context.Background())
+
 	// Trap SIGINT/SIGTERM so deferred temp-dir cleanup runs on Ctrl+C.
+	// Cancelling the context first kills any in-flight git child processes,
+	// which releases file locks (important on Windows) before cleanup runs.
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sig
-		for _, fn := range cleanupFns {
+		cmdCancel()
+		cleanupMu.Lock()
+		fns := append([]func(){}, cleanupFns...)
+		cleanupMu.Unlock()
+		for _, fn := range fns {
 			fn()
 		}
 		os.Exit(130)
 	}()
 
 	defer func() {
-		for _, fn := range cleanupFns {
+		cmdCancel()
+		cleanupMu.Lock()
+		fns := append([]func(){}, cleanupFns...)
+		cleanupMu.Unlock()
+		for _, fn := range fns {
 			fn()
 		}
 	}()
@@ -237,9 +256,9 @@ func Execute() {
 // When --target is set: only branches merged into that specific branch.
 func resolveBranches(target string, includeRemote bool, sortBy git.SortField) ([]git.Branch, error) {
 	if target != "" {
-		return git.MergedBranches(repoPath, target, includeRemote, sortBy)
+		return git.MergedBranches(cmdCtx, repoPath, target, includeRemote, sortBy)
 	}
-	return git.MergedBranchesAnywhere(repoPath, includeRemote, sortBy)
+	return git.MergedBranchesAnywhere(cmdCtx, repoPath, includeRemote, sortBy)
 }
 
 // parseTiers converts --tier and --tiers into [][]string.
