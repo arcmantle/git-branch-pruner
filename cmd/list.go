@@ -1,9 +1,12 @@
 package cmd
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
+	"strings"
 
 	"github.com/arcmantle/git-branch-pruner/internal/git"
 	"github.com/fatih/color"
@@ -15,7 +18,9 @@ var (
 	listRemote    bool
 	listTarget    string
 	listSort      string
-	listJSON      bool
+	listJSON      bool   // kept for backward compatibility
+	listFormat    string // table | json | csv
+	listOutput    string // file path; empty = stdout
 )
 
 var (
@@ -38,6 +43,21 @@ A remote URL can be passed as an argument — the repository will be cloned
 automatically (blobless bare clone) and cleaned up after the command finishes.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --json is a legacy alias for --format json
+		format := listFormat
+		if listJSON && format == "table" {
+			format = "json"
+		}
+		// Auto-detect format from output file extension if --format not explicitly set
+		if listOutput != "" && !cmd.Flags().Changed("format") {
+			switch {
+			case strings.HasSuffix(listOutput, ".csv"):
+				format = "csv"
+			case strings.HasSuffix(listOutput, ".json"):
+				format = "json"
+			}
+		}
+
 		includeRemote := listRemote || isBareClone
 		branches, err := resolveBranches(listTarget, includeRemote, git.SortField(listSort))
 		if err != nil {
@@ -53,46 +73,131 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 			return filterErr
 		}
 
+		// Resolve output writer.
+		out, closeOut, err := resolveOutput(listOutput)
+		if err != nil {
+			return err
+		}
+		defer closeOut()
+
+		// When writing to a file, disable color in the output.
+		fileMode := listOutput != ""
+
 		if len(branches) == 0 {
-			fmt.Print("No merged branches found")
-			fmt.Print(filterSuffix(listTarget, listOlderThan, includeRemote))
-			fmt.Println(".")
+			if !fileMode {
+				fmt.Print("No merged branches found")
+				fmt.Print(filterSuffix(listTarget, listOlderThan, includeRemote))
+				fmt.Println(".")
+			}
 			return nil
 		}
 
-		if listJSON {
-			return printJSON(branches)
+		switch format {
+		case "json":
+			return writeJSON(out, branches)
+		case "csv":
+			return writeCSV(out, branches)
+		default:
+			rows := buildRows(branches, fileMode)
+			if fileMode {
+				printTableTo(out, []string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
+				fmt.Fprintf(os.Stderr, "Wrote %d branch(es) to %s\n", len(branches), listOutput)
+			} else {
+				printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
+				fmt.Printf("\n%d branch(es) found", len(branches))
+				fmt.Print(filterSuffix(listTarget, listOlderThan, includeRemote))
+				fmt.Println(".")
+			}
 		}
-
-		var rows [][]string
-		for _, b := range branches {
-			bType := "local"
-			if b.IsRemote || isBareClone {
-				bType = remoteColor.Sprint("remote")
-			}
-			lastCommit := dimColor.Sprint("unknown")
-			relAge := dimColor.Sprint("unknown")
-			if !b.LastCommit.IsZero() {
-				lastCommit = b.LastCommit.Format("2006-01-02")
-				relAge = b.RelativeAge
-			}
-			mergedInto := dimColor.Sprint("(any)")
-			if b.MergedInto != "" {
-				mergedInto = b.MergedInto
-			}
-			sha := dimColor.Sprint("unknown")
-			if b.ShortSHA != "" {
-				sha = b.ShortSHA
-			}
-			rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit, sha})
-		}
-		printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
-
-		fmt.Printf("\n%d branch(es) found", len(branches))
-		fmt.Print(filterSuffix(listTarget, listOlderThan, includeRemote))
-		fmt.Println(".")
 		return nil
 	},
+}
+
+// resolveOutput returns a writer and a close func for the given path.
+// If path is empty, returns os.Stdout with a no-op closer.
+func resolveOutput(path string) (io.Writer, func(), error) {
+	if path == "" {
+		return os.Stdout, func() {}, nil
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening output file: %w", err)
+	}
+	return f, func() { f.Close() }, nil
+}
+
+// buildRows converts branches into string rows.
+// fileMode strips ANSI color codes so file output is clean plain text.
+func buildRows(branches []git.Branch, fileMode bool) [][]string {
+	var rows [][]string
+	for _, b := range branches {
+		bType := "local"
+		if b.IsRemote || isBareClone {
+			if fileMode {
+				bType = "remote"
+			} else {
+				bType = remoteColor.Sprint("remote")
+			}
+		}
+		lastCommit := "unknown"
+		relAge := "unknown"
+		if !b.LastCommit.IsZero() {
+			lastCommit = b.LastCommit.Format("2006-01-02")
+			relAge = b.RelativeAge
+		} else if !fileMode {
+			lastCommit = dimColor.Sprint("unknown")
+			relAge = dimColor.Sprint("unknown")
+		}
+		mergedInto := "(any)"
+		if b.MergedInto != "" {
+			mergedInto = b.MergedInto
+		} else if !fileMode {
+			mergedInto = dimColor.Sprint("(any)")
+		}
+		sha := "unknown"
+		if b.ShortSHA != "" {
+			sha = b.ShortSHA
+		} else if !fileMode {
+			sha = dimColor.Sprint("unknown")
+		}
+		rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit, sha})
+	}
+	return rows
+}
+
+// printTableTo writes a plain-text table to w (no color, no ellipsis truncation).
+func printTableTo(w io.Writer, headers []string, rows [][]string) {
+	const colPad = 2
+	n := len(headers)
+	widths := make([]int, n)
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+	for _, row := range rows {
+		for j := 0; j < n && j < len(row); j++ {
+			if l := len(row[j]); l > widths[j] {
+				widths[j] = l
+			}
+		}
+	}
+	// Header
+	for i, h := range headers {
+		if i < n-1 {
+			fmt.Fprintf(w, "%-*s", widths[i]+colPad, h)
+		} else {
+			fmt.Fprintln(w, h)
+		}
+	}
+	// Rows
+	for _, row := range rows {
+		for j, cell := range row {
+			if j < n-1 {
+				fmt.Fprintf(w, "%-*s", widths[j]+colPad, cell)
+			} else {
+				fmt.Fprintln(w, cell)
+			}
+		}
+	}
 }
 
 type jsonBranch struct {
@@ -102,9 +207,10 @@ type jsonBranch struct {
 	AgeDays     int    `json:"age_days"`
 	RelativeAge string `json:"relative_age"`
 	LastCommit  string `json:"last_commit,omitempty"`
+	SHA         string `json:"sha,omitempty"`
 }
 
-func printJSON(branches []git.Branch) error {
+func writeJSON(w io.Writer, branches []git.Branch) error {
 	out := make([]jsonBranch, len(branches))
 	for i, b := range branches {
 		bType := "local"
@@ -117,15 +223,47 @@ func printJSON(branches []git.Branch) error {
 			MergedInto:  b.MergedInto,
 			AgeDays:     b.AgeDays,
 			RelativeAge: b.RelativeAge,
+			SHA:         b.ShortSHA,
 		}
 		if !b.LastCommit.IsZero() {
 			jb.LastCommit = b.LastCommit.Format("2006-01-02")
 		}
 		out[i] = jb
 	}
-	enc := json.NewEncoder(os.Stdout)
+	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
 	return enc.Encode(out)
+}
+
+func writeCSV(w io.Writer, branches []git.Branch) error {
+	cw := csv.NewWriter(w)
+	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha"}); err != nil {
+		return err
+	}
+	for _, b := range branches {
+		bType := "local"
+		if b.IsRemote || isBareClone {
+			bType = "remote"
+		}
+		mergedInto := b.MergedInto
+		lastCommit := ""
+		if !b.LastCommit.IsZero() {
+			lastCommit = b.LastCommit.Format("2006-01-02")
+		}
+		if err := cw.Write([]string{
+			b.Name,
+			bType,
+			mergedInto,
+			fmt.Sprintf("%d", b.AgeDays),
+			b.RelativeAge,
+			lastCommit,
+			b.ShortSHA,
+		}); err != nil {
+			return err
+		}
+	}
+	cw.Flush()
+	return cw.Error()
 }
 
 // filterSuffix builds a human-readable description of active filters.
@@ -161,6 +299,8 @@ func init() {
 	listCmd.Flags().BoolVar(&listRemote, "remote", false, "include remote branches")
 	listCmd.Flags().StringVar(&listTarget, "target", "", "narrow to branches merged into this specific branch only")
 	listCmd.Flags().StringVar(&listSort, "sort", "age", "sort order: age (oldest first) or name")
-	listCmd.Flags().BoolVar(&listJSON, "json", false, "output as JSON")
+	listCmd.Flags().BoolVar(&listJSON, "json", false, "output as JSON (deprecated: use --format json)")
+	listCmd.Flags().StringVar(&listFormat, "format", "table", "output format: table, json, csv")
+	listCmd.Flags().StringVar(&listOutput, "output", "", "write output to file instead of stdout (auto-detects format from extension: .csv, .json)")
 	rootCmd.AddCommand(listCmd)
 }

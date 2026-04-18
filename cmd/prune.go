@@ -92,7 +92,7 @@ repository without cloning it yourself.`,
 
 		// --json: output candidates as JSON without any destructive action
 		if pruneJSON {
-			return printJSON(deletable)
+			return writeJSON(os.Stdout, deletable)
 		}
 
 		// Show table preview
