@@ -23,6 +23,7 @@ var (
 	listJSON      bool   // kept for backward compatibility
 	listFormat    string // table | json | csv
 	listOutput    string // file path; empty = stdout
+	listAuthors   bool   // fetch first-commit author per branch (extra processing)
 )
 
 var (
@@ -75,6 +76,11 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 			return filterErr
 		}
 
+		if listAuthors && len(branches) > 0 {
+			fmt.Fprint(os.Stderr, "Fetching branch authors...\n")
+			git.EnrichAuthors(repoPath, branches)
+		}
+
 		// Resolve output writer.
 		out, closeOut, err := resolveOutput(listOutput)
 		if err != nil {
@@ -101,11 +107,15 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 			return writeCSV(out, branches, buildMeta())
 		default:
 			rows := buildRows(branches, fileMode)
+			headers := []string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}
+			if listAuthors {
+				headers = append(headers, "AUTHOR")
+			}
 			if fileMode {
-				printTableTo(out, []string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
+				printTableTo(out, headers, rows)
 				fmt.Fprintf(os.Stderr, "Wrote %d branch(es) to %s\n", len(branches), listOutput)
 			} else {
-				printTable([]string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}, rows)
+				printTable(headers, rows)
 				fmt.Printf("\n%d branch(es) found", len(branches))
 				fmt.Print(filterSuffix(listTarget, listOlderThan, includeRemote))
 				fmt.Println(".")
@@ -162,7 +172,15 @@ func buildRows(branches []git.Branch, fileMode bool) [][]string {
 		} else if !fileMode {
 			sha = dimColor.Sprint("unknown")
 		}
-		rows = append(rows, []string{b.Name, bType, mergedInto, relAge, lastCommit, sha})
+		row := []string{b.Name, bType, mergedInto, relAge, lastCommit, sha}
+		if listAuthors {
+			author := b.Author
+			if author == "" && !fileMode {
+				author = dimColor.Sprint("unknown")
+			}
+			row = append(row, author)
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }
@@ -210,6 +228,7 @@ type jsonBranch struct {
 	RelativeAge string `json:"relative_age"`
 	LastCommit  string `json:"last_commit,omitempty"`
 	SHA         string `json:"sha,omitempty"`
+	Author      string `json:"author,omitempty"`
 }
 
 func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error {
@@ -230,6 +249,7 @@ func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error
 			AgeDays:     b.AgeDays,
 			RelativeAge: b.RelativeAge,
 			SHA:         b.ShortSHA,
+			Author:      b.Author,
 		}
 		if !b.LastCommit.IsZero() {
 			jb.LastCommit = b.LastCommit.Format("2006-01-02")
@@ -244,7 +264,7 @@ func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error
 func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error {
 	cw := csv.NewWriter(w)
 	// Header row first — CSV viewers treat row 1 as the header and color it.
-	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha"}); err != nil {
+	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha", "author"}); err != nil {
 		return err
 	}
 	cw.Flush()
@@ -275,6 +295,7 @@ func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error 
 			b.RelativeAge,
 			lastCommit,
 			b.ShortSHA,
+			b.Author,
 		}); err != nil {
 			return err
 		}
@@ -339,5 +360,6 @@ func init() {
 	listCmd.Flags().BoolVar(&listJSON, "json", false, "output as JSON (deprecated: use --format json)")
 	listCmd.Flags().StringVar(&listFormat, "format", "table", "output format: table, json, csv")
 	listCmd.Flags().StringVar(&listOutput, "output", "", "write output to file instead of stdout (auto-detects format from extension: .csv, .json)")
+	listCmd.Flags().BoolVar(&listAuthors, "authors", false, "fetch the first-commit author for each branch (slower; uses --ancestry-path)")
 	rootCmd.AddCommand(listCmd)
 }

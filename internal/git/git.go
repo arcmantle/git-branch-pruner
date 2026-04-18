@@ -24,6 +24,7 @@ type Branch struct {
 	RelativeAge string
 	MergedInto  string // the branch this was found merged into; used for deletion verification
 	ShortSHA    string // 7-char abbreviated tip commit hash
+	Author      string // author of the first commit unique to this branch (optional, requires --authors)
 }
 
 // SortField controls how branches are sorted.
@@ -395,6 +396,63 @@ func enrichAge(repoPath string, b *Branch) {
 	if len(fields) >= 2 {
 		b.ShortSHA = fields[1]
 	}
+}
+
+// EnrichAuthors populates the Author field for each branch using the first commit
+// that is unique to that branch (via --ancestry-path from the merge-base with MergedInto).
+// Runs in parallel using the same worker pool pattern as MergedBranchesAnywhere.
+func EnrichAuthors(repoPath string, branches []Branch) {
+	workers := runtime.NumCPU()
+	if workers > 8 {
+		workers = 8
+	}
+	jobs := make(chan int, workers*2)
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range jobs {
+				branches[i].Author = firstBranchAuthor(repoPath, &branches[i])
+			}
+		}()
+	}
+	for i := range branches {
+		jobs <- i
+	}
+	close(jobs)
+	wg.Wait()
+}
+
+// firstBranchAuthor returns the author name of the first commit unique to this branch.
+// It finds the merge-base between the tip and MergedInto (or HEAD if unknown), then
+// walks --ancestry-path in reverse to get the oldest branch-specific commit.
+func firstBranchAuthor(repoPath string, b *Branch) string {
+	tip := b.ShortSHA
+	if tip == "" {
+		return ""
+	}
+	base := b.MergedInto
+	if base == "" {
+		base = "HEAD"
+	}
+	// Find the common ancestor between the branch tip and its merge target.
+	mergeBase, err := runGit(repoPath, "merge-base", tip, base)
+	if err != nil || mergeBase == "" {
+		// Fallback: use the tip commit author directly.
+		out, err := runGit(repoPath, "log", "-1", "--format=%an", tip)
+		if err != nil {
+			return ""
+		}
+		return out
+	}
+	// Walk commits unique to this branch in chronological order; take the first.
+	out, err := runGit(repoPath, "log", "--ancestry-path", "--reverse", "--format=%an",
+		mergeBase+".."+tip)
+	if err != nil || out == "" {
+		return ""
+	}
+	return strings.SplitN(out, "\n", 2)[0]
 }
 
 // relativeTime returns a human-readable relative time string (e.g. "3 months ago").

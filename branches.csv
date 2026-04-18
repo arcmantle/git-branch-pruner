@@ -1,7 +1,6 @@
-# repo: /var/folders/2t/0rvbchtn1nz1xvnjmdbtmx0c0000gn/T/git-branch-pruner-1953961516
-# remote_url: https://github.com/eye-share/eye-share
-# generated: 2026-04-18T10:31:20Z
 name,type,merged_into,age_days,relative_age,last_commit,sha
+# remote_url: https://github.com/eye-share/eye-share
+# generated: 2026-04-18T10:35:23Z
 feature/tietoevry,remote,master,1926,5 years ago,2021-01-07,99b1cc43
 feature/autocoding,remote,master,1919,5 years ago,2021-01-15,06a931c6
 feature/webshop_build,remote,master,1591,4 years ago,2021-12-09,dae1c496
@@ -26,7 +25,7 @@ task/t1210244614670078_first_change_update_fix,remote,master,331,11 months ago,2
 task/t1209654942658646-CannotCopyUserWithTags,remote,master,331,11 months ago,2025-05-22,fc4ddb5e
 task/t1210108886819208_replacement-approvals-in-portal-not-included,remote,master,331,11 months ago,2025-05-22,683c916b
 task/t1210244643465815_applyCommands_no_throw,remote,master,326,10 months ago,2025-05-27,a27ef9f0
-task/t1209854299016931-EyeDa_snack,remote,master,325,10 months ago,2025-05-27,a550d54c
+task/t1209854299016931-EyeDa_snack,remote,master,326,10 months ago,2025-05-27,a550d54c
 task/t1210035985342613_clear-aggregation-stage-payment,remote,master,324,10 months ago,2025-05-28,e2c9dcbc
 task/t1210283419432667_Department-and-project-requisition-purchase-fixes,remote,master,324,10 months ago,2025-05-28,411ba2cd
 task/t1209830989808864_ancestor-access-for-company-message,remote,master,324,10 months ago,2025-05-28,bee41497
