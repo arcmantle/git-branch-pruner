@@ -34,7 +34,7 @@ var (
 )
 
 var pruneCmd = &cobra.Command{
-	Use:   "prune [url]",
+	Use:   "prune",
 	Short: "Delete merged branches",
 	Long: `Delete branches that have been merged and are safe to remove.
 
@@ -93,9 +93,16 @@ repository without cloning it yourself.`,
 			}
 
 			// Load branches from file instead of running git analysis.
-			loaded, err := loadBranchFile(pruneInput)
+			loaded, meta, err := loadBranchFile(pruneInput)
 			if err != nil {
 				return err
+			}
+
+			// Warn if the file's remote URL doesn't match the current repo.
+			if fileURL := meta["remote_url"]; fileURL != "" {
+				if currentURL := git.RemoteURL(repoPath); currentURL != "" && currentURL != fileURL {
+					warnColor.Fprintf(color.Error, "⚠ Input file was generated for %s but current repo remote is %s\n\n", fileURL, currentURL)
+				}
 			}
 			// Apply the same safety filters as the live path.
 			loaded = git.FilterProtected(loaded, protectedBranches)
@@ -222,10 +229,19 @@ repository without cloning it yourself.`,
 			}
 			if err := git.BatchDeleteRemoteBranches(repoPath, names); err != nil {
 				// Batch failed — retry individually for precise per-branch errors.
+				// If a branch was already deleted in the (partially successful) batch,
+				// git reports "remote ref does not exist" — treat that as success.
 				for _, b := range remoteBranches {
 					if err2 := git.BatchDeleteRemoteBranches(repoPath, []string{b.Name}); err2 != nil {
-						errs = append(errs, fmt.Sprintf("%s (remote): %v", b.Name, err2))
-						errorColor.Fprintf(color.Error, "  ✗ Failed to delete %s (remote): %v\n", b.Name, err2)
+						errMsg := err2.Error()
+						if strings.Contains(errMsg, "remote ref does not exist") ||
+							strings.Contains(errMsg, "could not find remote ref") {
+							successColor.Printf("  ✓ Deleted %s (remote)\n", b.Name)
+							deleted++
+						} else {
+							errs = append(errs, fmt.Sprintf("%s (remote): %v", b.Name, err2))
+							errorColor.Fprintf(color.Error, "  ✗ Failed to delete %s (remote): %v\n", b.Name, err2)
+						}
 					} else {
 						successColor.Printf("  ✓ Deleted %s (remote)\n", b.Name)
 						deleted++
@@ -249,51 +265,74 @@ repository without cloning it yourself.`,
 
 // loadBranchFile reads a CSV or JSON file produced by 'list --output' and
 // returns a slice of Branch values. Format is detected from the file extension.
-func loadBranchFile(path string) ([]git.Branch, error) {
+func loadBranchFile(path string) ([]git.Branch, map[string]string, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("opening input file: %w", err)
+		return nil, nil, fmt.Errorf("opening input file: %w", err)
 	}
 	defer f.Close()
 
 	ext := strings.ToLower(path)
 	switch {
 	case strings.HasSuffix(ext, ".json"):
-		return loadBranchJSON(f)
+		branches, meta, err := loadBranchJSON(f)
+		return branches, meta, err
 	case strings.HasSuffix(ext, ".csv"):
-		return loadBranchCSV(f)
+		branches, meta, err := loadBranchCSV(f)
+		return branches, meta, err
 	default:
-		return nil, fmt.Errorf("unsupported input file format for %q: must be .csv or .json", path)
+		return nil, nil, fmt.Errorf("unsupported input file format for %q: must be .csv or .json", path)
 	}
 }
 
-func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
-	// Strip # comment lines before passing to csv.Reader.
+// stripBOM removes a UTF-8 BOM (0xEF 0xBB 0xBF) from the start of s.
+// CSV files created on Windows (e.g. by Excel) often include a BOM which
+// would otherwise corrupt the first header field name.
+func stripBOM(s string) string {
+	return strings.TrimPrefix(s, "\xef\xbb\xbf")
+}
+
+func loadBranchCSV(r io.Reader) ([]git.Branch, map[string]string, error) {
+	meta := make(map[string]string)
+	// Strip # comment lines before passing to csv.Reader, and extract meta values.
 	var filtered strings.Builder
 	scanner := bufio.NewScanner(r)
+	first := true
 	for scanner.Scan() {
 		line := scanner.Text()
-		if !strings.HasPrefix(line, "#") {
-			filtered.WriteString(line + "\n")
+		if first {
+			line = stripBOM(line)
+			first = false
 		}
+		if strings.HasPrefix(line, "#") {
+			// Extract meta from comment lines like "# remote_url: https://..."
+			if kv := strings.SplitN(strings.TrimPrefix(line, "#"), ":", 2); len(kv) == 2 {
+				meta[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+			}
+			continue
+		}
+		filtered.WriteString(line + "\n")
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading CSV: %w", err)
+		return nil, nil, fmt.Errorf("reading CSV: %w", err)
 	}
 
 	cr := csv.NewReader(strings.NewReader(filtered.String()))
 	records, err := cr.ReadAll()
 	if err != nil {
-		return nil, fmt.Errorf("parsing CSV: %w", err)
+		return nil, nil, fmt.Errorf("parsing CSV: %w", err)
 	}
 	if len(records) < 2 {
-		return nil, nil
+		return nil, meta, nil
 	}
 	// Build column index from header row so the file is order-independent.
 	header := records[0]
 	idx := make(map[string]int, len(header))
 	for i, h := range header {
 		idx[h] = i
+	}
+	if _, ok := idx["name"]; !ok {
+		return nil, nil, fmt.Errorf("CSV header missing required \"name\" column (got: %s)", strings.Join(header, ", "))
 	}
 	col := func(row []string, name string) string {
 		if i, ok := idx[name]; ok && i < len(row) {
@@ -308,11 +347,11 @@ func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
 			continue
 		}
 		if strings.HasPrefix(name, "-") {
-			return nil, fmt.Errorf("invalid branch name %q in CSV: branch names cannot start with '-'", name)
+			return nil, nil, fmt.Errorf("invalid branch name %q in CSV: branch names cannot start with '-'", name)
 		}
 		mergedInto := col(row, "merged_into")
 		if mergedInto != "" && strings.HasPrefix(mergedInto, "-") {
-			return nil, fmt.Errorf("invalid merged_into value %q in CSV: must not start with '-'", mergedInto)
+			return nil, nil, fmt.Errorf("invalid merged_into value %q in CSV: must not start with '-'", mergedInto)
 		}
 		b := git.Branch{
 			Name:       name,
@@ -322,24 +361,29 @@ func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
 		}
 		branches = append(branches, b)
 	}
-	return branches, nil
+	return branches, meta, nil
 }
 
-func loadBranchJSON(r io.Reader) ([]git.Branch, error) {
+func loadBranchJSON(r io.Reader) ([]git.Branch, map[string]string, error) {
 	// Support both old format (array) and new format ({meta, branches}).
 	var raw json.RawMessage
 	if err := json.NewDecoder(r).Decode(&raw); err != nil {
-		return nil, fmt.Errorf("parsing JSON: %w", err)
+		return nil, nil, fmt.Errorf("parsing JSON: %w", err)
 	}
 	var records []jsonBranch
+	meta := make(map[string]string)
 	// Try wrapper format first.
 	var wrapper struct {
-		Branches []jsonBranch `json:"branches"`
+		Meta     map[string]string `json:"meta"`
+		Branches []jsonBranch      `json:"branches"`
 	}
 	if err := json.Unmarshal(raw, &wrapper); err == nil && wrapper.Branches != nil {
 		records = wrapper.Branches
+		for k, v := range wrapper.Meta {
+			meta[k] = v
+		}
 	} else if err := json.Unmarshal(raw, &records); err != nil {
-		return nil, fmt.Errorf("parsing JSON: %w", err)
+		return nil, nil, fmt.Errorf("parsing JSON: %w", err)
 	}
 	var branches []git.Branch
 	for _, jb := range records {
@@ -347,10 +391,10 @@ func loadBranchJSON(r io.Reader) ([]git.Branch, error) {
 			continue
 		}
 		if strings.HasPrefix(jb.Name, "-") {
-			return nil, fmt.Errorf("invalid branch name %q in JSON: branch names cannot start with '-'", jb.Name)
+			return nil, nil, fmt.Errorf("invalid branch name %q in JSON: branch names cannot start with '-'", jb.Name)
 		}
 		if jb.MergedInto != "" && strings.HasPrefix(jb.MergedInto, "-") {
-			return nil, fmt.Errorf("invalid merged_into value %q in JSON: must not start with '-'", jb.MergedInto)
+			return nil, nil, fmt.Errorf("invalid merged_into value %q in JSON: must not start with '-'", jb.MergedInto)
 		}
 		branches = append(branches, git.Branch{
 			Name:       jb.Name,
@@ -359,7 +403,7 @@ func loadBranchJSON(r io.Reader) ([]git.Branch, error) {
 			SHA:        jb.SHA,
 		})
 	}
-	return branches, nil
+	return branches, meta, nil
 }
 
 func printBranchTable(branches []git.Branch) {

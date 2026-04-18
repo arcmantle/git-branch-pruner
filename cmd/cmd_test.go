@@ -197,7 +197,7 @@ name,type,merged_into,age_days,relative_age,last_commit,sha,author
 feature/a,local,main,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abcdef123456,Alice
 feature/b,remote,release/1.0,20,20 days ago,2024-12-22,def1234567890abcdef1234567890abcdef123456,Bob
 `
-	branches, err := loadBranchCSV(strings.NewReader(input))
+	branches, meta, err := loadBranchCSV(strings.NewReader(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -210,17 +210,60 @@ feature/b,remote,release/1.0,20,20 days ago,2024-12-22,def1234567890abcdef123456
 	if branches[1].Name != "feature/b" || branches[1].IsRemote != true || branches[1].MergedInto != "release/1.0" {
 		t.Errorf("branch 1: %+v", branches[1])
 	}
+	if meta["remote_url"] != "https://example.com/repo.git" {
+		t.Errorf("meta remote_url = %q, want %q", meta["remote_url"], "https://example.com/repo.git")
+	}
 }
 
 func TestLoadBranchCSV_Empty(t *testing.T) {
 	input := `name,type,merged_into,age_days,relative_age,last_commit,sha,author
 `
-	branches, err := loadBranchCSV(strings.NewReader(input))
+	branches, _, err := loadBranchCSV(strings.NewReader(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(branches) != 0 {
 		t.Errorf("expected 0 branches, got %d", len(branches))
+	}
+}
+
+func TestLoadBranchCSV_BOM(t *testing.T) {
+	// UTF-8 BOM (0xEF, 0xBB, 0xBF) prepended — common in Windows-generated CSV files.
+	input := "\xef\xbb\xbf# remote_url: https://example.com/repo.git\nname,type,merged_into,age_days,relative_age,last_commit,sha,author\nfeature/a,local,main,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abcdef123456,Alice\n"
+	branches, meta, err := loadBranchCSV(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(branches) != 1 || branches[0].Name != "feature/a" {
+		t.Errorf("expected 1 branch (feature/a), got %v", branches)
+	}
+	if meta["remote_url"] != "https://example.com/repo.git" {
+		t.Errorf("meta remote_url = %q, want %q", meta["remote_url"], "https://example.com/repo.git")
+	}
+}
+
+func TestLoadBranchCSV_BOMOnHeader(t *testing.T) {
+	// BOM directly before the header row (no comment lines).
+	input := "\xef\xbb\xbfname,type,merged_into,age_days,relative_age,last_commit,sha,author\nfeature/b,remote,develop,5,5 days ago,2025-06-01,def1234567890abcdef1234567890abcdef123456,Bob\n"
+	branches, _, err := loadBranchCSV(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(branches) != 1 || branches[0].Name != "feature/b" {
+		t.Errorf("expected 1 branch (feature/b), got %v", branches)
+	}
+}
+
+func TestLoadBranchCSV_MissingNameColumn(t *testing.T) {
+	input := `branch,type,merged_into
+feature/a,local,main
+`
+	_, _, err := loadBranchCSV(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("expected error for missing 'name' column, got nil")
+	}
+	if !strings.Contains(err.Error(), "missing required") {
+		t.Errorf("unexpected error message: %v", err)
 	}
 }
 
@@ -236,7 +279,7 @@ func TestLoadBranchJSON_Wrapper(t *testing.T) {
     {"name": "fix/y", "type": "remote", "merged_into": "develop", "sha": "def5678"}
   ]
 }`
-	branches, err := loadBranchJSON(strings.NewReader(input))
+	branches, meta, err := loadBranchJSON(strings.NewReader(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -249,11 +292,14 @@ func TestLoadBranchJSON_Wrapper(t *testing.T) {
 	if branches[1].Name != "fix/y" || branches[1].IsRemote != true {
 		t.Errorf("branch 1: %+v", branches[1])
 	}
+	if meta["repo"] != "/tmp/test" {
+		t.Errorf("meta repo = %q, want %q", meta["repo"], "/tmp/test")
+	}
 }
 
 func TestLoadBranchJSON_Empty(t *testing.T) {
 	input := `{"branches": []}`
-	branches, err := loadBranchJSON(strings.NewReader(input))
+	branches, _, err := loadBranchJSON(strings.NewReader(input))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -270,7 +316,7 @@ func TestLoadBranchCSV_RejectsDashName(t *testing.T) {
 	input := `name,type,merged_into,age_days,relative_age,last_commit,sha,author
 --delete,local,main,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abcdef123456,Alice
 `
-	_, err := loadBranchCSV(strings.NewReader(input))
+	_, _, err := loadBranchCSV(strings.NewReader(input))
 	if err == nil {
 		t.Fatal("expected error for dash-prefixed branch name, got nil")
 	}
@@ -283,7 +329,7 @@ func TestLoadBranchCSV_RejectsDashMergedInto(t *testing.T) {
 	input := `name,type,merged_into,age_days,relative_age,last_commit,sha,author
 feature/x,local,--all,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abcdef123456,Alice
 `
-	_, err := loadBranchCSV(strings.NewReader(input))
+	_, _, err := loadBranchCSV(strings.NewReader(input))
 	if err == nil {
 		t.Fatal("expected error for dash-prefixed merged_into, got nil")
 	}
@@ -294,7 +340,7 @@ feature/x,local,--all,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abc
 
 func TestLoadBranchJSON_RejectsDashName(t *testing.T) {
 	input := `{"branches": [{"name": "--force", "type": "local", "merged_into": "main"}]}`
-	_, err := loadBranchJSON(strings.NewReader(input))
+	_, _, err := loadBranchJSON(strings.NewReader(input))
 	if err == nil {
 		t.Fatal("expected error for dash-prefixed branch name, got nil")
 	}
@@ -305,7 +351,7 @@ func TestLoadBranchJSON_RejectsDashName(t *testing.T) {
 
 func TestLoadBranchJSON_RejectsDashMergedInto(t *testing.T) {
 	input := `{"branches": [{"name": "feature/x", "type": "local", "merged_into": "--all"}]}`
-	_, err := loadBranchJSON(strings.NewReader(input))
+	_, _, err := loadBranchJSON(strings.NewReader(input))
 	if err == nil {
 		t.Fatal("expected error for dash-prefixed merged_into, got nil")
 	}

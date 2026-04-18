@@ -128,7 +128,9 @@ func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy So
 	var branches []Branch
 
 	// Local merged branches
-	localOut, err := runGit(repoPath, "branch", "--merged", targetBranch, "--format=%(refname:short)")
+	// Use --merged=<value> (not --merged <value>) so a "-"-prefixed target
+	// cannot be misinterpreted as a git flag.
+	localOut, err := runGit(repoPath, "branch", "--merged="+targetBranch, "--format=%(refname:short)")
 	if err != nil {
 		return nil, fmt.Errorf("listing local merged branches: %w", err)
 	}
@@ -141,12 +143,12 @@ func MergedBranches(repoPath, targetBranch string, includeRemote bool, sortBy So
 
 	// Remote merged branches
 	if includeRemote {
-		remoteOut, err := runGit(repoPath, "branch", "-r", "--merged", targetBranch, "--format=%(refname:short)")
+		remoteOut, err := runGit(repoPath, "branch", "-r", "--merged="+targetBranch, "--format=%(refname:short)")
 		if err != nil {
 			return nil, fmt.Errorf("listing remote merged branches: %w", err)
 		}
 		for _, name := range splitLines(remoteOut) {
-			if name == "" || strings.Contains(name, "HEAD") {
+			if name == "" || name == "origin/HEAD" {
 				continue
 			}
 			shortName := strings.TrimPrefix(name, "origin/")
@@ -201,7 +203,7 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 					continue
 				}
 				name := strings.TrimPrefix(parts[0], "origin/")
-				if strings.Contains(name, "HEAD") {
+				if name == "HEAD" {
 					continue
 				}
 				allRefs = append(allRefs, ref{idx: len(allRefs), name: name, tip: parts[1], isRemote: true})
@@ -384,7 +386,13 @@ func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstPare
 		}
 		// Skip this container if the candidate's tip is on its first-parent path —
 		// that means container descended from candidate, not that candidate was merged in.
-		if fpc.isTrivialAncestor(repoPath, tip, shortC) {
+		// Use the full ref for remote containers so rev-list resolves the correct branch
+		// and the cache key doesn't collide with local branches of the same short name.
+		ancestorRef := shortC
+		if remote {
+			ancestorRef = "origin/" + shortC
+		}
+		if fpc.isTrivialAncestor(repoPath, tip, ancestorRef) {
 			continue
 		}
 		containers = append(containers, shortC)
