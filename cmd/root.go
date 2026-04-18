@@ -9,6 +9,7 @@ import (
 "github.com/arcmantle/git-branch-pruner/internal/git"
 "github.com/fatih/color"
 "github.com/spf13/cobra"
+"golang.org/x/term"
 )
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
@@ -18,39 +19,109 @@ func visibleLen(s string) int {
 return len(ansiRe.ReplaceAllString(s, ""))
 }
 
-// printTable prints headers (plain text, rendered bold) and pre-colored rows.
-// Column widths are based on visible length so ANSI codes do not affect alignment.
+// terminalWidth returns the current terminal width, falling back to 120.
+func terminalWidth() int {
+	if w, _, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+		return w
+	}
+	return 120
+}
+
+// wrapColumn breaks s into lines of at most width characters.
+// Prefers to break on word boundaries (-, /, _) when close to the limit.
+func wrapColumn(s string, width int) []string {
+	if width <= 0 || len(s) <= width {
+		return []string{s}
+	}
+	var lines []string
+	for len(s) > width {
+		cut := width
+		// Search backwards for a natural break point (-, /, _) within the last 15 chars.
+		for i := width - 1; i >= width-15 && i > 0; i-- {
+			if s[i] == '-' || s[i] == '/' || s[i] == '_' {
+				cut = i + 1 // include the separator on the current line
+				break
+			}
+		}
+		lines = append(lines, s[:cut])
+		s = s[cut:]
+	}
+	if len(s) > 0 {
+		lines = append(lines, s)
+	}
+	return lines
+}
+
+// printTable prints headers and rows with automatic column alignment.
+// The first column (BRANCH) is capped so the table fits within the terminal
+// width; names longer than the cap wrap onto continuation rows.
 func printTable(headers []string, rows [][]string) {
-const colPad = 2
-n := len(headers)
-widths := make([]int, n)
-for i, h := range headers {
-widths[i] = len(h)
-}
-for _, row := range rows {
-for j := 0; j < n && j < len(row); j++ {
-if w := visibleLen(row[j]); w > widths[j] {
-widths[j] = w
-}
-}
-}
-for i, h := range headers {
-cell := headerColor.Sprint(h)
-if i < n-1 {
-fmt.Print(cell + strings.Repeat(" ", widths[i]+colPad-len(h)))
-} else {
-fmt.Println(cell)
-}
-}
-for _, row := range rows {
-for j, cell := range row {
-if j < n-1 {
-fmt.Print(cell + strings.Repeat(" ", widths[j]+colPad-visibleLen(cell)))
-} else {
-fmt.Println(cell)
-}
-}
-}
+	const colPad = 2
+	const minBranchCol = 20
+	n := len(headers)
+
+	// Compute natural widths from data (ignoring ANSI).
+	widths := make([]int, n)
+	for i, h := range headers {
+		widths[i] = len(h)
+	}
+	for _, row := range rows {
+		for j := 0; j < n && j < len(row); j++ {
+			if w := visibleLen(row[j]); w > widths[j] {
+				widths[j] = w
+			}
+		}
+	}
+
+	// Cap column 0 so the full row fits in the terminal.
+	// otherWidth = sum of all non-first columns + their padding + first col padding.
+	otherWidth := 0
+	for i := 1; i < n; i++ {
+		otherWidth += widths[i] + colPad
+	}
+	maxBranchCol := terminalWidth() - otherWidth - colPad
+	if maxBranchCol < minBranchCol {
+		maxBranchCol = minBranchCol
+	}
+	if widths[0] > maxBranchCol {
+		widths[0] = maxBranchCol
+	}
+
+	// Print header row.
+	for i, h := range headers {
+		cell := headerColor.Sprint(h)
+		if i < n-1 {
+			fmt.Print(cell + strings.Repeat(" ", widths[i]+colPad-len(h)))
+		} else {
+			fmt.Println(cell)
+		}
+	}
+
+	// Print data rows, wrapping column 0 if needed.
+	for _, row := range rows {
+		var col0 string
+		if len(row) > 0 {
+			col0 = row[0]
+		}
+		branchLines := wrapColumn(col0, widths[0])
+		for li, segment := range branchLines {
+			if li == 0 {
+				// First line: branch segment + remaining columns.
+				fmt.Print(segment + strings.Repeat(" ", widths[0]+colPad-visibleLen(segment)))
+				for j := 1; j < n && j < len(row); j++ {
+					cell := row[j]
+					if j < n-1 {
+						fmt.Print(cell + strings.Repeat(" ", widths[j]+colPad-visibleLen(cell)))
+					} else {
+						fmt.Println(cell)
+					}
+				}
+			} else {
+				// Continuation line: indented branch segment only.
+				fmt.Println("  " + segment)
+			}
+		}
+	}
 }
 
 var urlPrefixes = []string{"https://", "http://", "git://", "ssh://", "git@"}
