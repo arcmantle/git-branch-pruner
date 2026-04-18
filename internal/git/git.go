@@ -13,6 +13,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/mattn/go-isatty"
 )
 
 // Branch represents a git branch with metadata.
@@ -241,7 +243,9 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 					}
 				}
 				n := progress.Add(1)
-				fmt.Fprintf(os.Stderr, "\rAnalysing branches... %d/%d", n, total)
+				if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+					fmt.Fprintf(os.Stderr, "\rAnalysing branches... %d/%d", n, total)
+				}
 			}
 		}()
 	}
@@ -251,7 +255,9 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 	}
 	close(jobs)
 	wg.Wait()
-	fmt.Fprintln(os.Stderr)
+	if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+		fmt.Fprintln(os.Stderr)
+	}
 
 	var candidates []Branch
 	for _, res := range results {
@@ -326,51 +332,51 @@ var preferredBases = []string{"main", "master", "develop", "development", "trunk
 // Prefers well-known base branches over incidental containers.
 // Returns "" if no valid container is found.
 func findContainer(repoPath, branchName, tip string, remote bool, fpc *firstParentCache) string {
-args := []string{"branch", "--contains", tip, "--format=%(refname:short)"}
-if remote {
-args = append(args[:1], append([]string{"-r"}, args[1:]...)...)
-}
-out, err := runGit(repoPath, args...)
-if err != nil {
-return ""
-}
+	args := []string{"branch", "--contains", tip, "--format=%(refname:short)"}
+	if remote {
+		args = append(args[:1], append([]string{"-r"}, args[1:]...)...)
+	}
+	out, err := runGit(repoPath, args...)
+	if err != nil {
+		return ""
+	}
 
-var containers []string
-for _, c := range splitLines(out) {
-shortC := strings.TrimPrefix(c, "origin/")
-if shortC == "" || shortC == branchName {
-continue
-}
-// Skip this container if the candidate's tip is on its first-parent path —
-// that means container descended from candidate, not that candidate was merged in.
-if fpc.isTrivialAncestor(repoPath, tip, shortC) {
-continue
-}
-containers = append(containers, shortC)
-}
-if len(containers) == 0 {
-return ""
-}
+	var containers []string
+	for _, c := range splitLines(out) {
+		shortC := strings.TrimPrefix(c, "origin/")
+		if shortC == "" || shortC == branchName {
+			continue
+		}
+		// Skip this container if the candidate's tip is on its first-parent path —
+		// that means container descended from candidate, not that candidate was merged in.
+		if fpc.isTrivialAncestor(repoPath, tip, shortC) {
+			continue
+		}
+		containers = append(containers, shortC)
+	}
+	if len(containers) == 0 {
+		return ""
+	}
 
-// Prefer well-known base branches
-for _, preferred := range preferredBases {
-for _, c := range containers {
-if c == preferred {
-return c
-}
-}
-}
-// Prefer long-lived branch patterns (release/*, hotfix/*, support/*)
-for _, c := range containers {
-lower := strings.ToLower(c)
-if strings.HasPrefix(lower, "release/") ||
-strings.HasPrefix(lower, "hotfix/") ||
-strings.HasPrefix(lower, "support/") ||
-strings.HasPrefix(lower, "maintenance/") {
-return c
-}
-}
-return containers[0]
+	// Prefer well-known base branches
+	for _, preferred := range preferredBases {
+		for _, c := range containers {
+			if c == preferred {
+				return c
+			}
+		}
+	}
+	// Prefer long-lived branch patterns (release/*, hotfix/*, support/*)
+	for _, c := range containers {
+		lower := strings.ToLower(c)
+		if strings.HasPrefix(lower, "release/") ||
+			strings.HasPrefix(lower, "hotfix/") ||
+			strings.HasPrefix(lower, "support/") ||
+			strings.HasPrefix(lower, "maintenance/") {
+			return c
+		}
+	}
+	return containers[0]
 }
 
 // enrichAge fills in LastCommit, AgeDays, RelativeAge, and ShortSHA for a branch.
@@ -425,34 +431,46 @@ func EnrichAuthors(repoPath string, branches []Branch) {
 }
 
 // firstBranchAuthor returns the author name of the first commit unique to this branch.
-// It finds the merge-base between the tip and MergedInto (or HEAD if unknown), then
-// walks --ancestry-path in reverse to get the oldest branch-specific commit.
+//
+// For squash/rebase merges the branch tip is NOT in the target's history, so we can
+// compute a real merge-base and walk --ancestry-path to find the oldest branch-unique
+// commit.
+//
+// For regular merge commits the tip IS already reachable from the target branch
+// (merge-base == tip), making the log range empty.  In that case we fall back to the
+// tip commit's author, which is the most recent person to work on the branch and a
+// reliable proxy for ownership.
 func firstBranchAuthor(repoPath string, b *Branch) string {
-	tip := b.ShortSHA
-	if tip == "" {
+	if b.ShortSHA == "" {
 		return ""
 	}
 	base := b.MergedInto
 	if base == "" {
 		base = "HEAD"
 	}
-	// Find the common ancestor between the branch tip and its merge target.
-	mergeBase, err := runGit(repoPath, "merge-base", tip, base)
-	if err != nil || mergeBase == "" {
-		// Fallback: use the tip commit author directly.
-		out, err := runGit(repoPath, "log", "-1", "--format=%an", tip)
-		if err != nil {
-			return ""
+
+	mergeBase, err := runGit(repoPath, "merge-base", b.ShortSHA, base)
+	if err == nil && mergeBase != "" {
+		// Expand the short SHA so we can compare it against the full merge-base hash.
+		fullSHA, expandErr := runGit(repoPath, "rev-parse", b.ShortSHA)
+		tipInBase := expandErr == nil && mergeBase == fullSHA
+		if !tipInBase {
+			// Tip is not directly in the target's history (squash / rebase merge).
+			// Walk the branch-unique commits in chronological order and take the first.
+			out, logErr := runGit(repoPath, "log", "--ancestry-path", "--reverse",
+				"--format=%an", mergeBase+".."+b.ShortSHA)
+			if logErr == nil && out != "" {
+				return strings.SplitN(out, "\n", 2)[0]
+			}
 		}
-		return out
 	}
-	// Walk commits unique to this branch in chronological order; take the first.
-	out, err := runGit(repoPath, "log", "--ancestry-path", "--reverse", "--format=%an",
-		mergeBase+".."+tip)
-	if err != nil || out == "" {
+
+	// Fallback (regular merge commit, or any error above): author of the tip commit.
+	out, err := runGit(repoPath, "log", "-1", "--format=%an", b.ShortSHA)
+	if err != nil {
 		return ""
 	}
-	return strings.SplitN(out, "\n", 2)[0]
+	return out
 }
 
 // relativeTime returns a human-readable relative time string (e.g. "3 months ago").
@@ -484,6 +502,16 @@ func plural(n int, unit string) string {
 		return fmt.Sprintf("1 %s", unit)
 	}
 	return fmt.Sprintf("%d %ss", n, unit)
+}
+
+// ValidateSortField returns an error if s is not a recognised SortField.
+func ValidateSortField(s string) error {
+	switch SortField(s) {
+	case SortByAge, SortByName:
+		return nil
+	default:
+		return fmt.Errorf("invalid --sort value %q: must be \"age\" or \"name\"", s)
+	}
 }
 
 func sortBranches(branches []Branch, by SortField) {

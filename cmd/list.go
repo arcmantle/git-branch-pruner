@@ -20,7 +20,6 @@ var (
 	listRemote    bool
 	listTarget    string
 	listSort      string
-	listJSON      bool   // kept for backward compatibility
 	listFormat    string // table | json | csv
 	listOutput    string // file path; empty = stdout
 	listAuthors   bool   // fetch first-commit author per branch (extra processing)
@@ -46,11 +45,13 @@ A remote URL can be passed as an argument — the repository will be cloned
 automatically (blobless bare clone) and cleaned up after the command finishes.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		// --json is a legacy alias for --format json
-		format := listFormat
-		if listJSON && format == "table" {
-			format = "json"
+		if err := git.ValidateSortField(listSort); err != nil {
+			return err
 		}
+		if listFormat != "table" && listFormat != "json" && listFormat != "csv" {
+			return fmt.Errorf("invalid --format value %q: must be \"table\", \"json\", or \"csv\"", listFormat)
+		}
+		format := listFormat
 		// Auto-detect format from output file extension if --format not explicitly set
 		if listOutput != "" && !cmd.Flags().Changed("format") {
 			switch {
@@ -268,6 +269,9 @@ func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error 
 		return err
 	}
 	cw.Flush()
+	if err := cw.Error(); err != nil {
+		return err
+	}
 
 	// Metadata as # comment lines after the header.
 	// Skipped by loadBranchCSV; visible as context when opening the file.
@@ -276,6 +280,7 @@ func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error 
 	}
 	fmt.Fprintf(w, "# generated: %s\n", meta["generated"])
 
+	// New writer needed after raw writes to w to keep buffering aligned.
 	cw = csv.NewWriter(w)
 	for _, b := range branches {
 		bType := "local"
@@ -339,6 +344,9 @@ func filterSuffix(target string, olderThan int, remote bool) string {
 	for _, p := range excludeMergedInto {
 		parts = append(parts, "excluding merged-into \""+p+"\"")
 	}
+	if tiersShorthand != "" || len(tierPatterns) > 0 {
+		parts = append(parts, "tier-filtered")
+	}
 	if len(parts) == 0 {
 		return ""
 	}
@@ -357,7 +365,6 @@ func init() {
 	listCmd.Flags().BoolVar(&listRemote, "remote", false, "include remote branches")
 	listCmd.Flags().StringVar(&listTarget, "target", "", "narrow to branches merged into this specific branch only")
 	listCmd.Flags().StringVar(&listSort, "sort", "age", "sort order: age (oldest first) or name")
-	listCmd.Flags().BoolVar(&listJSON, "json", false, "output as JSON (deprecated: use --format json)")
 	listCmd.Flags().StringVar(&listFormat, "format", "table", "output format: table, json, csv")
 	listCmd.Flags().StringVar(&listOutput, "output", "", "write output to file instead of stdout (auto-detects format from extension: .csv, .json)")
 	listCmd.Flags().BoolVar(&listAuthors, "authors", false, "fetch the first-commit author for each branch (slower; uses --ancestry-path)")

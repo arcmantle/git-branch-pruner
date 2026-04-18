@@ -54,6 +54,9 @@ repository without cloning it yourself.`,
 		if isBareClone {
 			return fmt.Errorf("prune is not supported for remote URLs — use 'list <url>' to analyse a remote repository")
 		}
+		if err := git.ValidateSortField(pruneSort); err != nil {
+			return err
+		}
 
 		// --json implies read-only: treat as dry-run
 		if pruneJSON {
@@ -70,6 +73,8 @@ repository without cloning it yourself.`,
 			if err != nil {
 				return err
 			}
+			// Apply the same safety filters as the live path.
+			loaded = git.FilterProtected(loaded, protectedBranches)
 			// Still skip the currently checked-out branch.
 			for _, b := range loaded {
 				if !b.IsRemote && b.Name == currentBranch {

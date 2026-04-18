@@ -8,6 +8,8 @@ builds:
   - binary: git-branch-pruner
     env:
       - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/arcmantle/git-branch-pruner/cmd.Version={{.Version}}
     goos:
       - linux
       - darwin
