@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -95,9 +96,9 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 
 		switch format {
 		case "json":
-			return writeJSON(out, branches)
+			return writeJSON(out, branches, buildMeta())
 		case "csv":
-			return writeCSV(out, branches)
+			return writeCSV(out, branches, buildMeta())
 		default:
 			rows := buildRows(branches, fileMode)
 			if fileMode {
