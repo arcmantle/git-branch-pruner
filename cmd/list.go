@@ -242,18 +242,21 @@ func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error
 }
 
 func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error {
-	// Write repo metadata as # comment lines so the file is self-documenting.
-	// These lines are skipped by loadBranchCSV.
-	fmt.Fprintf(w, "# repo: %s\n", meta["repo"])
+	cw := csv.NewWriter(w)
+	// Header row first — CSV viewers treat row 1 as the header and color it.
+	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha"}); err != nil {
+		return err
+	}
+	cw.Flush()
+
+	// Metadata as # comment lines after the header.
+	// Skipped by loadBranchCSV; visible as context when opening the file.
 	if r := meta["remote_url"]; r != "" {
 		fmt.Fprintf(w, "# remote_url: %s\n", r)
 	}
 	fmt.Fprintf(w, "# generated: %s\n", meta["generated"])
 
-	cw := csv.NewWriter(w)
-	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha"}); err != nil {
-		return err
-	}
+	cw = csv.NewWriter(w)
 	for _, b := range branches {
 		bType := "local"
 		if b.IsRemote || isBareClone {

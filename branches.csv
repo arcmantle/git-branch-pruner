@@ -1,3 +1,6 @@
+# repo: /var/folders/2t/0rvbchtn1nz1xvnjmdbtmx0c0000gn/T/git-branch-pruner-1953961516
+# remote_url: https://github.com/eye-share/eye-share
+# generated: 2026-04-18T10:31:20Z
 name,type,merged_into,age_days,relative_age,last_commit,sha
 feature/tietoevry,remote,master,1926,5 years ago,2021-01-07,99b1cc43
 feature/autocoding,remote,master,1919,5 years ago,2021-01-15,06a931c6
@@ -93,7 +96,7 @@ task/t1210715292883117_login_issues,remote,master,233,7 months ago,2025-08-28,dc
 task/t1210892378933155_ExternalLineRefUsePoLine.Id,remote,master,231,7 months ago,2025-08-29,03f1bd7e
 task/t1211090409988430_rotate_attachment_bug,remote,master,231,7 months ago,2025-08-29,874b01fc
 task/t1211169144986534_set-migration-flag-on-entity,remote,master,231,7 months ago,2025-08-29,4959ff97
-task/t1210691742072709_proj_dep_not_set_on_accLines,remote,master,227,7 months ago,2025-09-02,8c73cfb6
+task/t1210691742072709_proj_dep_not_set_on_accLines,remote,master,228,7 months ago,2025-09-02,8c73cfb6
 task/t1207287149112500_Add_ChangeLog_to_TransferBatchifier,remote,master,227,7 months ago,2025-09-02,e4e7e49f
 task/t1211193844190525-Supplier_Connections,remote,master,227,7 months ago,2025-09-02,fa36fe5a
 task/t1210494350376974_console-error-purchase-approver,remote,master,226,7 months ago,2025-09-03,75ead5e6
@@ -293,8 +296,8 @@ task/t1212306405092843_avatar_file_validatio,remote,master,35,1 month ago,2026-0
 task/t1213398978144770_If-you-change-purchase-order-number-the-coding-lines-are-not-updated,remote,hotfix/15.1.26-gjesdal,33,1 month ago,2026-03-16,e8e34c91
 task/t1208909443961234_invoiceagreement-approver-lines,remote,master,32,1 month ago,2026-03-16,c0f02094
 task/t1213642419466082-Swagger_does_not_work,remote,master,32,1 month ago,2026-03-16,cd29d672
+task/t1212827192673841_eOrder_sending_eInvoice_setup,remote,master,31,1 month ago,2026-03-18,bfe2359d
 task/t1213615629925218_make-headdimensionelasticfilter.filter-virtual,remote,hotfix/15.1.26-gjesdal,31,1 month ago,2026-03-17,1f6ef076
-task/t1212827192673841_eOrder_sending_eInvoice_setup,remote,master,30,1 month ago,2026-03-18,bfe2359d
 task/t1213454071638092_affecting_rules,remote,master,30,1 month ago,2026-03-19,ff10a6d2
 task/t1210892379566716-dual-fields-replacement,remote,master,29,29 days ago,2026-03-19,59839d49
 task/t1212945653459136-supplier-search,remote,master,29,29 days ago,2026-03-19,afa74258
@@ -307,18 +310,18 @@ task/t1212794520821655-mobile_navigation,remote,hotfix/26.0.5-spring-break,21,21
 task/t1212794520821655-mobile_navigation2,remote,hotfix/26.0.5-spring-break,17,17 days ago,2026-04-01,9362f33f
 task/t1213884638533137_Report-translation-error,remote,hotfix/15.7.2-counttofive,17,17 days ago,2026-03-31,1e0780fd
 task/t1213831948025372-replication_enrich_failure,remote,hotfix/15.1.26-gjesdal,11,11 days ago,2026-04-07,8ffe652f
+release/26.1-moving-on,remote,master,11,11 days ago,2026-04-07,2be2ca17
 task/t1213388100617159-MCP_Retrieve_Documents_From_Modules,remote,hotfix/26.0.5-spring-break,10,10 days ago,2026-04-07,011cd20a
-release/26.1-moving-on,remote,master,10,10 days ago,2026-04-07,2be2ca17
 task/t1212726348875192-user_license_count_retry,remote,hotfix/15.4.15-diaperchange,9,9 days ago,2026-04-09,0e378486
 task/t1212216632085976-fix_duplicate_package_numbers,remote,hotfix/15.1.26-gjesdal,8,8 days ago,2026-04-10,38b84642
 task/t1212794520821655-mobile_navigation3,remote,hotfix/26.0.5-spring-break,7,7 days ago,2026-04-10,02e6d908
-task/t1214053589377324_navigating_company_setup,remote,hotfix/26.0.5-spring-break,4,4 days ago,2026-04-13,7c87186d
 task/t1212715345824817-requistion_4_eye_approval_rule,remote,hotfix/15.1.26-gjesdal,4,4 days ago,2026-04-13,af756c21
-task/t1214030764306788-dimension-not-in-use-import,remote,hotfix/15.1.26-gjesdal,4,4 days ago,2026-04-13,9a30d7e4
 task/t1213730243212412-excel_export_from_item,remote,hotfix/15.7.2-counttofive,4,4 days ago,2026-04-14,12edcd47
-task/t1212810503973808-Fix-stability-issues-when-adding-a-provider,remote,hotfix/15.7.2-counttofive,3,3 days ago,2026-04-14,833dac60
-task/t1206101589238404_Purchase_module_new,remote,hotfix/26.0.5-spring-break,3,3 days ago,2026-04-15,c245ed2d
-task/t1213339519733890_COntract_stuff,remote,hotfix/15.1.26-gjesdal,3,3 days ago,2026-04-14,9a0ef92d
+task/t1214030764306788-dimension-not-in-use-import,remote,hotfix/15.1.26-gjesdal,4,4 days ago,2026-04-13,9a30d7e4
+task/t1214053589377324_navigating_company_setup,remote,hotfix/26.0.5-spring-break,4,4 days ago,2026-04-13,7c87186d
 task/t1213593364300076-Fix-stability-issues-when-adding-a-provider,remote,hotfix/26.0.5-spring-break,3,3 days ago,2026-04-14,892a317c
+task/t1212810503973808-Fix-stability-issues-when-adding-a-provider,remote,hotfix/15.7.2-counttofive,3,3 days ago,2026-04-14,833dac60
+task/t1213339519733890_COntract_stuff,remote,hotfix/15.1.26-gjesdal,3,3 days ago,2026-04-14,9a0ef92d
+task/t1206101589238404_Purchase_module_new,remote,hotfix/26.0.5-spring-break,3,3 days ago,2026-04-15,c245ed2d
 task/t1213259071336157_flex_readonly-lines,remote,hotfix/26.0.5-spring-break,2,2 days ago,2026-04-16,ded5a9d6
 task/t1212471166328039_linemandates-supplier,remote,hotfix/26.0.5-spring-break,1,1 day ago,2026-04-16,ac209827
