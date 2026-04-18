@@ -72,6 +72,7 @@ protectedBranches []string
 noColor           bool
 excludeMergedInto []string
 tierPatterns      []string // raw --tier values; parsed into tiers [][]string at use
+tiersShorthand    string   // raw --tiers value; e.g. "main,master <- release/* <- hotfix/*"
 isBareClone       bool
 cleanupFns        []func()
 )
@@ -126,22 +127,37 @@ return git.MergedBranches(repoPath, target, includeRemote, sortBy)
 return git.MergedBranchesAnywhere(repoPath, includeRemote, sortBy)
 }
 
-// parseTiers converts the raw --tier string values into [][]string.
-// Each --tier value is a comma-separated list of glob patterns at that level.
+// parseTiers converts --tier and --tiers into [][]string.
+// --tiers "main,master <- release/* <- hotfix/*" is a shorthand for
+// multiple --tier flags. Both can be combined; --tiers is prepended.
 func parseTiers() [][]string {
-if len(tierPatterns) == 0 {
-return nil
-}
-tiers := make([][]string, len(tierPatterns))
-for i, raw := range tierPatterns {
-for _, p := range strings.Split(raw, ",") {
-p = strings.TrimSpace(p)
-if p != "" {
-tiers[i] = append(tiers[i], p)
-}
-}
-}
-return tiers
+	var raw []string
+
+	// Parse --tiers shorthand: split on "<-", trim whitespace around each segment.
+	if tiersShorthand != "" {
+		for _, segment := range strings.Split(tiersShorthand, "<-") {
+			segment = strings.TrimSpace(segment)
+			if segment != "" {
+				raw = append(raw, segment)
+			}
+		}
+	}
+
+	raw = append(raw, tierPatterns...)
+
+	if len(raw) == 0 {
+		return nil
+	}
+	tiers := make([][]string, len(raw))
+	for i, r := range raw {
+		for _, p := range strings.Split(r, ",") {
+			p = strings.TrimSpace(p)
+			if p != "" {
+				tiers[i] = append(tiers[i], p)
+			}
+		}
+	}
+	return tiers
 }
 
 func init() {
@@ -149,5 +165,6 @@ rootCmd.PersistentFlags().StringVarP(&repoPath, "repo", "C", "", "path to the gi
 rootCmd.PersistentFlags().StringSliceVar(&protectedBranches, "protected", protectedDefault, "branches to never delete")
 rootCmd.PersistentFlags().BoolVar(&noColor, "no-color", false, "disable color output")
 rootCmd.PersistentFlags().StringArrayVar(&excludeMergedInto, "exclude-merged-into", nil, "exclude branches merged into a branch matching this regex (can be repeated)")
-rootCmd.PersistentFlags().StringArrayVar(&tierPatterns, "tier", nil, "protection tier (repeatable, first = highest priority); e.g. --tier \"main,master\" --tier \"release/*\" --tier \"hotfix/*\"")
+rootCmd.PersistentFlags().StringArrayVar(&tierPatterns, "tier", nil, "protection tier (repeatable, first = highest priority); e.g. --tier \"main,master\" --tier \"release/*\"")
+rootCmd.PersistentFlags().StringVar(&tiersShorthand, "tiers", "", "protection hierarchy in one string, levels separated by <-; e.g. --tiers \"main,master <- release/* <- hotfix/*,support/*\"")
 }
