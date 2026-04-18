@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/arcmantle/git-branch-pruner/internal/git"
 	"github.com/fatih/color"
@@ -105,7 +107,11 @@ repository without cloning it yourself.`,
 				}
 			}
 			// Apply the same safety filters as the live path.
+			beforeProtect := len(loaded)
 			loaded = git.FilterProtected(loaded, protectedBranches)
+			if skipped := beforeProtect - len(loaded); skipped > 0 {
+				warnColor.Fprintf(color.Error, "⚠ Skipped %d protected branch(es) from input file\n\n", skipped)
+			}
 			// Still skip the currently checked-out branch.
 			for _, b := range loaded {
 				if !b.IsRemote && b.Name == currentBranch {
@@ -354,10 +360,22 @@ func loadBranchCSV(r io.Reader) ([]git.Branch, map[string]string, error) {
 			return nil, nil, fmt.Errorf("invalid merged_into value %q in CSV: must not start with '-'", mergedInto)
 		}
 		b := git.Branch{
-			Name:       name,
-			IsRemote:   col(row, "type") == "remote",
-			MergedInto: mergedInto,
-			SHA:        col(row, "sha"),
+			Name:        name,
+			IsRemote:    col(row, "type") == "remote",
+			MergedInto:  mergedInto,
+			SHA:         col(row, "sha"),
+			RelativeAge: col(row, "relative_age"),
+			Author:      col(row, "author"),
+		}
+		if v := col(row, "age_days"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil {
+				b.AgeDays = n
+			}
+		}
+		if v := col(row, "last_commit"); v != "" {
+			if t, err := time.Parse("2006-01-02", v); err == nil {
+				b.LastCommit = t
+			}
 		}
 		branches = append(branches, b)
 	}
@@ -396,12 +414,21 @@ func loadBranchJSON(r io.Reader) ([]git.Branch, map[string]string, error) {
 		if jb.MergedInto != "" && strings.HasPrefix(jb.MergedInto, "-") {
 			return nil, nil, fmt.Errorf("invalid merged_into value %q in JSON: must not start with '-'", jb.MergedInto)
 		}
-		branches = append(branches, git.Branch{
-			Name:       jb.Name,
-			IsRemote:   jb.Type == "remote",
-			MergedInto: jb.MergedInto,
-			SHA:        jb.SHA,
-		})
+		b := git.Branch{
+			Name:        jb.Name,
+			IsRemote:    jb.Type == "remote",
+			MergedInto:  jb.MergedInto,
+			SHA:         jb.SHA,
+			AgeDays:     jb.AgeDays,
+			RelativeAge: jb.RelativeAge,
+			Author:      jb.Author,
+		}
+		if jb.LastCommit != "" {
+			if t, err := time.Parse("2006-01-02", jb.LastCommit); err == nil {
+				b.LastCommit = t
+			}
+		}
+		branches = append(branches, b)
 	}
 	return branches, meta, nil
 }

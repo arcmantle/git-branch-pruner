@@ -109,6 +109,12 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 					if err := writeCSV(out, nil, buildMeta()); err != nil {
 						return err
 					}
+				default:
+					headers := []string{"BRANCH", "TYPE", "MERGED INTO", "AGE", "LAST COMMIT", "SHA"}
+					if listAuthors {
+						headers = append(headers, "AUTHOR")
+					}
+					printTableTo(out, headers, nil)
 				}
 				fmt.Fprintln(os.Stderr, "No merged branches found.")
 			} else {

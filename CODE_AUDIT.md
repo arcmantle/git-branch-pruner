@@ -276,3 +276,49 @@
 - **Severity:** Info (Windows-specific)
 - **Problem:** `cmd.Stderr = os.Stderr` with `--progress` flag means git's clone progress (which uses `\r` and ANSI codes for line rewriting) goes directly to the terminal. On Windows `cmd.exe` without VTP, git's own ANSI codes in progress output could produce garbled text. Git usually auto-detects terminal capabilities, but `--progress` forces output regardless.
 - **Recommendation:** Could pipe through `color.Error` (`go-colorable`) or let git auto-detect by removing `--progress` and relying on git's isatty check. Very low priority since git's own progress rendering is git's responsibility, and the tool explicitly requires git to be installed.
+
+---
+
+## Audit #7 — 2026-04-18
+
+### Issues Fixed
+
+#### 37. `loadBranchCSV` and `loadBranchJSON` discard age/date/author metadata from input files
+- **Files:** `cmd/prune.go` — `loadBranchCSV`, `loadBranchJSON`
+- **Severity:** Medium (UX)
+- **Problem:** When using `prune --input`, the CSV and JSON loaders only extracted `name`, `type`, `merged_into`, and `sha` from each record. The `age_days`, `relative_age`, `last_commit`, and `author` fields — which are present in files produced by `list --output` — were silently discarded. As a result, the prune preview table showed `"unknown"` for the AGE, LAST COMMIT, and (if present) AUTHOR columns, even though the data was available in the file. This made the preview table unhelpful for users deciding whether to proceed with deletion.
+- **Fix:** Updated `loadBranchCSV` to parse `age_days` (via `strconv.Atoi`), `last_commit` (via `time.Parse("2006-01-02", ...)`), `relative_age`, and `author` into the `Branch` struct. Updated `loadBranchJSON` to map `AgeDays`, `RelativeAge`, `Author`, and `LastCommit` from the JSON record into the `Branch` struct. Added 2 test cases (`TestLoadBranchCSV` extended with age/date/author assertions, `TestLoadBranchJSON_ParsesAgeAndDate`).
+
+#### 38. `list --output file --format table` with zero branches creates an empty file
+- **File:** `cmd/list.go` — `RunE` zero-branches path
+- **Severity:** Low (UX consistency)
+- **Problem:** When `list` finds no merged branches and writes to a file, the JSON format produced `{"branches":[]}` and CSV produced headers-only output — both valid empty representations. However, table format had no `default` case in the format switch, producing a completely empty file (0 bytes). A user opening the file would see nothing, with no indication whether the tool ran correctly or failed silently.
+- **Fix:** Added a `default` case that writes the header row (via `printTableTo`) with no data rows, matching the empty-output behavior of JSON and CSV. The `--authors` flag is respected in the header row.
+
+#### 39. `prune --input` silently filters protected branches without warning
+- **File:** `cmd/prune.go` — `RunE` input-loading path
+- **Severity:** Low (Safety/UX)
+- **Problem:** When loading branches from `--input`, `FilterProtected` was applied to remove protected branches, but no indication was given to the user. If a user's input file contained `main` or `master` (which would normally be protected), those entries were silently dropped. The user would see fewer branches in the preview than expected, with no explanation. By contrast, the currently checked-out branch already had an explicit `"⚠ Skipping currently checked-out branch: ..."` warning.
+- **Fix:** Added a count comparison before and after `FilterProtected`. When branches are removed, a warning is printed to stderr: `"⚠ Skipped N protected branch(es) from input file"`.
+
+---
+
+### Issues Identified (Not Yet Fixed)
+
+#### 40. `loadBranchJSON` array fallback produces confusing error for malformed wrapper JSON
+- **File:** `cmd/prune.go` — `loadBranchJSON`
+- **Severity:** Info
+- **Problem:** `loadBranchJSON` tries to unmarshal as wrapper format (`{"meta": ..., "branches": [...]}`) first, then falls back to a plain array. If the JSON has wrapper structure but a malformed `branches` value (e.g. `{"branches": "not-an-array"}`), the wrapper unmarshal fails and the error is discarded. The array unmarshal also fails but produces a different, less helpful error message. The user sees a generic "parsing JSON" error instead of one pointing to the malformed `branches` field.
+- **Recommendation:** When the wrapper unmarshal fails but the JSON contains a `"branches"` key, prefer the wrapper error message. Very low priority since the current error is sufficient to identify the problem.
+
+#### 41. Future commit timestamps produce negative `AgeDays` and odd `relativeTime` output
+- **File:** `internal/git/git.go` — `enrichAge`, `relativeTime`
+- **Severity:** Info
+- **Problem:** If a commit timestamp is in the future (due to clock skew, intentionally set dates, or timezone misconfiguration), `time.Since` returns a negative duration. `AgeDays` becomes negative (e.g. `-3`), and `relativeTime` returns `"just now"` (since all negative durations are `< time.Minute`). `FilterByAge` with `olderThan > 0` correctly excludes these branches (negative < positive), so no incorrect deletions occur. The display is slightly misleading but harmless.
+- **Recommendation:** Clamp `AgeDays` to 0 and display `"in the future"` or `"just now"` explicitly. Very low priority since future timestamps are rare and the safety behavior is correct.
+
+#### 42. `DefaultBranch` function is exported but never called (dead code) — carried from audit #27
+- **File:** `internal/git/git.go` — `DefaultBranch`
+- **Severity:** Info
+- **Problem:** Still present and uncalled. See audit item #27 for details.
+- **Recommendation:** Same as #27. Remove or document intent.

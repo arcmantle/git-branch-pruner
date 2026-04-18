@@ -213,6 +213,19 @@ feature/b,remote,release/1.0,20,20 days ago,2024-12-22,def1234567890abcdef123456
 	if meta["remote_url"] != "https://example.com/repo.git" {
 		t.Errorf("meta remote_url = %q, want %q", meta["remote_url"], "https://example.com/repo.git")
 	}
+	// Verify age/date/author fields are parsed from CSV.
+	if branches[0].AgeDays != 10 {
+		t.Errorf("branch 0 AgeDays = %d, want 10", branches[0].AgeDays)
+	}
+	if branches[0].RelativeAge != "10 days ago" {
+		t.Errorf("branch 0 RelativeAge = %q, want %q", branches[0].RelativeAge, "10 days ago")
+	}
+	if branches[0].Author != "Alice" {
+		t.Errorf("branch 0 Author = %q, want %q", branches[0].Author, "Alice")
+	}
+	if branches[0].LastCommit.Format("2006-01-02") != "2025-01-01" {
+		t.Errorf("branch 0 LastCommit = %v, want 2025-01-01", branches[0].LastCommit)
+	}
 }
 
 func TestLoadBranchCSV_Empty(t *testing.T) {
@@ -294,6 +307,35 @@ func TestLoadBranchJSON_Wrapper(t *testing.T) {
 	}
 	if meta["repo"] != "/tmp/test" {
 		t.Errorf("meta repo = %q, want %q", meta["repo"], "/tmp/test")
+	}
+}
+
+func TestLoadBranchJSON_ParsesAgeAndDate(t *testing.T) {
+	input := `{
+  "branches": [
+    {"name": "feature/x", "type": "local", "merged_into": "main", "sha": "abc1234",
+     "age_days": 42, "relative_age": "1 month ago", "last_commit": "2025-03-01", "author": "Alice"}
+  ]
+}`
+	branches, _, err := loadBranchJSON(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(branches) != 1 {
+		t.Fatalf("expected 1 branch, got %d", len(branches))
+	}
+	b := branches[0]
+	if b.AgeDays != 42 {
+		t.Errorf("AgeDays = %d, want 42", b.AgeDays)
+	}
+	if b.RelativeAge != "1 month ago" {
+		t.Errorf("RelativeAge = %q, want %q", b.RelativeAge, "1 month ago")
+	}
+	if b.Author != "Alice" {
+		t.Errorf("Author = %q, want %q", b.Author, "Alice")
+	}
+	if b.LastCommit.Format("2006-01-02") != "2025-03-01" {
+		t.Errorf("LastCommit = %v, want 2025-03-01", b.LastCommit)
 	}
 }
 
