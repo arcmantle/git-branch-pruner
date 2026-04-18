@@ -188,7 +188,20 @@ func loadBranchFile(path string) ([]git.Branch, error) {
 }
 
 func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
-	cr := csv.NewReader(r)
+	// Strip # comment lines before passing to csv.Reader.
+	var filtered strings.Builder
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "#") {
+			filtered.WriteString(line + "\n")
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("reading CSV: %w", err)
+	}
+
+	cr := csv.NewReader(strings.NewReader(filtered.String()))
 	records, err := cr.ReadAll()
 	if err != nil {
 		return nil, fmt.Errorf("parsing CSV: %w", err)
@@ -226,8 +239,19 @@ func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
 }
 
 func loadBranchJSON(r io.Reader) ([]git.Branch, error) {
+	// Support both old format (array) and new format ({meta, branches}).
+	var raw json.RawMessage
+	if err := json.NewDecoder(r).Decode(&raw); err != nil {
+		return nil, fmt.Errorf("parsing JSON: %w", err)
+	}
 	var records []jsonBranch
-	if err := json.NewDecoder(r).Decode(&records); err != nil {
+	// Try wrapper format first.
+	var wrapper struct {
+		Branches []jsonBranch `json:"branches"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err == nil && wrapper.Branches != nil {
+		records = wrapper.Branches
+	} else if err := json.Unmarshal(raw, &records); err != nil {
 		return nil, fmt.Errorf("parsing JSON: %w", err)
 	}
 	var branches []git.Branch

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/arcmantle/git-branch-pruner/internal/git"
 	"github.com/fatih/color"
@@ -210,8 +211,12 @@ type jsonBranch struct {
 	SHA         string `json:"sha,omitempty"`
 }
 
-func writeJSON(w io.Writer, branches []git.Branch) error {
-	out := make([]jsonBranch, len(branches))
+func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error {
+	type output struct {
+		Meta     map[string]string `json:"meta,omitempty"`
+		Branches []jsonBranch      `json:"branches"`
+	}
+	records := make([]jsonBranch, len(branches))
 	for i, b := range branches {
 		bType := "local"
 		if b.IsRemote {
@@ -228,14 +233,22 @@ func writeJSON(w io.Writer, branches []git.Branch) error {
 		if !b.LastCommit.IsZero() {
 			jb.LastCommit = b.LastCommit.Format("2006-01-02")
 		}
-		out[i] = jb
+		records[i] = jb
 	}
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
-	return enc.Encode(out)
+	return enc.Encode(output{Meta: meta, Branches: records})
 }
 
-func writeCSV(w io.Writer, branches []git.Branch) error {
+func writeCSV(w io.Writer, branches []git.Branch, meta map[string]string) error {
+	// Write repo metadata as # comment lines so the file is self-documenting.
+	// These lines are skipped by loadBranchCSV.
+	fmt.Fprintf(w, "# repo: %s\n", meta["repo"])
+	if r := meta["remote_url"]; r != "" {
+		fmt.Fprintf(w, "# remote_url: %s\n", r)
+	}
+	fmt.Fprintf(w, "# generated: %s\n", meta["generated"])
+
 	cw := csv.NewWriter(w)
 	if err := cw.Write([]string{"name", "type", "merged_into", "age_days", "relative_age", "last_commit", "sha"}); err != nil {
 		return err
@@ -264,6 +277,26 @@ func writeCSV(w io.Writer, branches []git.Branch) error {
 	}
 	cw.Flush()
 	return cw.Error()
+}
+
+// buildMeta returns metadata about the repo being analysed.
+func buildMeta() map[string]string {
+	repo := repoPath
+	if repo == "" {
+		if wd, err := os.Getwd(); err == nil {
+			repo = wd
+		}
+	} else if abs, err := filepath.Abs(repo); err == nil {
+		repo = abs
+	}
+	m := map[string]string{
+		"repo":      repo,
+		"generated": time.Now().UTC().Format(time.RFC3339),
+	}
+	if remote := git.RemoteURL(repoPath); remote != "" {
+		m["remote_url"] = remote
+	}
+	return m
 }
 
 // filterSuffix builds a human-readable description of active filters.

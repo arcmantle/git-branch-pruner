@@ -78,6 +78,15 @@ func CloneForAnalysis(url, destDir string) error {
 	return cmd.Run()
 }
 
+// RemoteURL returns the fetch URL for the origin remote, or "" if not set.
+func RemoteURL(repoPath string) string {
+	out, err := runGit(repoPath, "remote", "get-url", "origin")
+	if err != nil {
+		return ""
+	}
+	return out
+}
+
 // CurrentBranch returns the name of the currently checked-out branch.
 func CurrentBranch(repoPath string) string {
 	out, err := runGit(repoPath, "symbolic-ref", "--short", "HEAD")
