@@ -3,8 +3,11 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/signal"
 	"regexp"
+	"runtime/debug"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 
 	"github.com/arcmantle/git-branch-pruner/internal/git"
@@ -14,7 +17,16 @@ import (
 )
 
 // Version is set at build time via -ldflags "-X github.com/arcmantle/git-branch-pruner/cmd.Version=..."
+// Falls back to the module version embedded by Go when installed via `go install`.
 var Version = "dev"
+
+func init() {
+	if Version == "dev" {
+		if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+			Version = info.Main.Version
+		}
+	}
+}
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
@@ -33,8 +45,14 @@ func terminalWidth() int {
 
 // truncate shortens s to at most maxLen visible runes, appending "…" if cut.
 func truncate(s string, maxLen int) string {
+	if maxLen <= 0 {
+		return ""
+	}
 	if utf8.RuneCountInString(s) <= maxLen {
 		return s
+	}
+	if maxLen == 1 {
+		return "…"
 	}
 	runes := []rune(s)
 	return string(runes[:maxLen-1]) + "…"
@@ -83,9 +101,9 @@ func printTable(headers []string, rows [][]string) {
 	for i, h := range headers {
 		cell := headerColor.Sprint(h)
 		if i < n-1 {
-			fmt.Print(cell + strings.Repeat(" ", widths[i]+colPad-utf8.RuneCountInString(h)))
+			fmt.Fprint(color.Output, cell+strings.Repeat(" ", widths[i]+colPad-utf8.RuneCountInString(h)))
 		} else {
-			fmt.Println(cell)
+			fmt.Fprintln(color.Output, cell)
 		}
 	}
 
@@ -96,9 +114,13 @@ func printTable(headers []string, rows [][]string) {
 				cell = truncate(cell, widths[0])
 			}
 			if j < n-1 {
-				fmt.Print(cell + strings.Repeat(" ", widths[j]+colPad-visibleLen(cell)))
+				pad := widths[j] + colPad - visibleLen(cell)
+				if pad < 0 {
+					pad = 0
+				}
+				fmt.Fprint(color.Output, cell+strings.Repeat(" ", pad))
 			} else {
-				fmt.Println(cell)
+				fmt.Fprintln(color.Output, cell)
 			}
 		}
 	}
@@ -129,10 +151,10 @@ var (
 )
 
 var rootCmd = &cobra.Command{
-	Use:          "git-branch-pruner",
-	Short:        "Find and delete merged git branches",
-	Long:         "A CLI tool to identify branches that have been merged and are candidates for deletion, with configurable age filtering.",
-	Version:      Version,
+	Use:           "git-branch-pruner",
+	Short:         "Find and delete merged git branches",
+	Long:          "A CLI tool to identify branches that have been merged and are candidates for deletion, with configurable age filtering.",
+	Version:       Version,
 	SilenceErrors: true,
 	SilenceUsage:  true,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
@@ -188,6 +210,17 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() {
+	// Trap SIGINT/SIGTERM so deferred temp-dir cleanup runs on Ctrl+C.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sig
+		for _, fn := range cleanupFns {
+			fn()
+		}
+		os.Exit(130)
+	}()
+
 	defer func() {
 		for _, fn := range cleanupFns {
 			fn()

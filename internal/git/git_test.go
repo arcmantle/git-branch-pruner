@@ -128,15 +128,15 @@ func TestFilterByTierHierarchy_Empty(t *testing.T) {
 
 func TestFilterByTierHierarchy(t *testing.T) {
 	tiers := [][]string{
-		{"main", "master"},  // tier 0 — never prunable
-		{"release/*"},       // tier 1 — prunable only if merged into tier 0
-		{"hotfix/*"},        // tier 2 — prunable only if merged into tier < 2
+		{"main", "master"}, // tier 0 — never prunable
+		{"release/*"},      // tier 1 — prunable only if merged into tier 0
+		{"hotfix/*"},       // tier 2 — prunable only if merged into tier < 2
 	}
 
 	cases := []struct {
-		branch     Branch
-		wantKept   bool
-		desc       string
+		branch   Branch
+		wantKept bool
+		desc     string
 	}{
 		// Tier 0 — never prunable
 		{makeBranch("main", "master"), false, "tier-0 main → never prunable"},
@@ -269,6 +269,27 @@ func TestFilterByExcludeMergedInto_Empty(t *testing.T) {
 	got, err := FilterByExcludeMergedInto(branches, nil)
 	if err != nil || len(got) != 1 {
 		t.Errorf("nil patterns should return all branches unchanged, got %v err=%v", got, err)
+	}
+}
+
+func TestFilterByExcludeMergedInto_Anchored(t *testing.T) {
+	// "main" should NOT exclude "domain" or "mainline" (anchored match).
+	branches := []Branch{
+		makeBranch("feature/a", "main"),
+		makeBranch("feature/b", "domain"),
+		makeBranch("feature/c", "mainline"),
+	}
+	got, err := FilterByExcludeMergedInto(branches, []string{"main"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 branches (domain, mainline), got %d: %v", len(got), got)
+	}
+	for _, b := range got {
+		if b.MergedInto == "main" {
+			t.Errorf("branch merged into 'main' should have been excluded")
+		}
 	}
 }
 

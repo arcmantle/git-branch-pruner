@@ -68,6 +68,30 @@ repository without cloning it yourself.`,
 		var deletable []git.Branch
 
 		if pruneInput != "" {
+			// Warn about flags that are silently ignored when --input is used.
+			var ignored []string
+			if cmd.Flags().Changed("older-than") {
+				ignored = append(ignored, "--older-than")
+			}
+			if cmd.Flags().Changed("target") {
+				ignored = append(ignored, "--target")
+			}
+			if cmd.Flags().Changed("remote") {
+				ignored = append(ignored, "--remote")
+			}
+			if cmd.Flags().Changed("sort") {
+				ignored = append(ignored, "--sort")
+			}
+			if cmd.Flags().Changed("exclude-merged-into") {
+				ignored = append(ignored, "--exclude-merged-into")
+			}
+			if cmd.Flags().Changed("tier") || cmd.Flags().Changed("tiers") {
+				ignored = append(ignored, "--tier/--tiers")
+			}
+			if len(ignored) > 0 {
+				warnColor.Fprintf(color.Error, "⚠ %s ignored when --input is used\n\n", strings.Join(ignored, ", "))
+			}
+
 			// Load branches from file instead of running git analysis.
 			loaded, err := loadBranchFile(pruneInput)
 			if err != nil {
@@ -78,7 +102,7 @@ repository without cloning it yourself.`,
 			// Still skip the currently checked-out branch.
 			for _, b := range loaded {
 				if !b.IsRemote && b.Name == currentBranch {
-					warnColor.Fprintf(os.Stderr, "⚠ Skipping currently checked-out branch: %s\n\n", b.Name)
+					warnColor.Fprintf(color.Error, "⚠ Skipping currently checked-out branch: %s\n\n", b.Name)
 				} else {
 					deletable = append(deletable, b)
 				}
@@ -100,7 +124,7 @@ repository without cloning it yourself.`,
 
 			for _, b := range branches {
 				if !b.IsRemote && b.Name == currentBranch {
-					warnColor.Fprintf(os.Stderr, "⚠ Skipping currently checked-out branch: %s\n\n", b.Name)
+					warnColor.Fprintf(color.Error, "⚠ Skipping currently checked-out branch: %s\n\n", b.Name)
 				} else {
 					deletable = append(deletable, b)
 				}
@@ -171,7 +195,7 @@ repository without cloning it yourself.`,
 					bType = "remote"
 				}
 				errs = append(errs, fmt.Sprintf("%s (%s): %v", b.Name, bType, err))
-				errorColor.Fprintf(os.Stderr, "  ✗ Failed to verify %s (%s): %v\n", b.Name, bType, err)
+				errorColor.Fprintf(color.Error, "  ✗ Failed to verify %s (%s): %v\n", b.Name, bType, err)
 			} else if b.IsRemote {
 				remoteBranches = append(remoteBranches, b)
 			} else {
@@ -183,7 +207,7 @@ repository without cloning it yourself.`,
 		for _, b := range localBranches {
 			if err := git.DeleteLocalBranch(repoPath, b); err != nil {
 				errs = append(errs, fmt.Sprintf("%s (local): %v", b.Name, err))
-				errorColor.Fprintf(os.Stderr, "  ✗ Failed to delete %s (local): %v\n", b.Name, err)
+				errorColor.Fprintf(color.Error, "  ✗ Failed to delete %s (local): %v\n", b.Name, err)
 			} else {
 				successColor.Printf("  ✓ Deleted %s (local)\n", b.Name)
 				deleted++
@@ -201,7 +225,7 @@ repository without cloning it yourself.`,
 				for _, b := range remoteBranches {
 					if err2 := git.BatchDeleteRemoteBranches(repoPath, []string{b.Name}); err2 != nil {
 						errs = append(errs, fmt.Sprintf("%s (remote): %v", b.Name, err2))
-						errorColor.Fprintf(os.Stderr, "  ✗ Failed to delete %s (remote): %v\n", b.Name, err2)
+						errorColor.Fprintf(color.Error, "  ✗ Failed to delete %s (remote): %v\n", b.Name, err2)
 					} else {
 						successColor.Printf("  ✓ Deleted %s (remote)\n", b.Name)
 						deleted++
@@ -232,10 +256,11 @@ func loadBranchFile(path string) ([]git.Branch, error) {
 	}
 	defer f.Close()
 
+	ext := strings.ToLower(path)
 	switch {
-	case strings.HasSuffix(path, ".json"):
+	case strings.HasSuffix(ext, ".json"):
 		return loadBranchJSON(f)
-	case strings.HasSuffix(path, ".csv"):
+	case strings.HasSuffix(ext, ".csv"):
 		return loadBranchCSV(f)
 	default:
 		return nil, fmt.Errorf("unsupported input file format for %q: must be .csv or .json", path)
@@ -282,10 +307,17 @@ func loadBranchCSV(r io.Reader) ([]git.Branch, error) {
 		if name == "" {
 			continue
 		}
+		if strings.HasPrefix(name, "-") {
+			return nil, fmt.Errorf("invalid branch name %q in CSV: branch names cannot start with '-'", name)
+		}
+		mergedInto := col(row, "merged_into")
+		if mergedInto != "" && strings.HasPrefix(mergedInto, "-") {
+			return nil, fmt.Errorf("invalid merged_into value %q in CSV: must not start with '-'", mergedInto)
+		}
 		b := git.Branch{
 			Name:       name,
 			IsRemote:   col(row, "type") == "remote",
-			MergedInto: col(row, "merged_into"),
+			MergedInto: mergedInto,
 			SHA:        col(row, "sha"),
 		}
 		branches = append(branches, b)
@@ -313,6 +345,12 @@ func loadBranchJSON(r io.Reader) ([]git.Branch, error) {
 	for _, jb := range records {
 		if jb.Name == "" {
 			continue
+		}
+		if strings.HasPrefix(jb.Name, "-") {
+			return nil, fmt.Errorf("invalid branch name %q in JSON: branch names cannot start with '-'", jb.Name)
+		}
+		if jb.MergedInto != "" && strings.HasPrefix(jb.MergedInto, "-") {
+			return nil, fmt.Errorf("invalid merged_into value %q in JSON: must not start with '-'", jb.MergedInto)
 		}
 		branches = append(branches, git.Branch{
 			Name:       jb.Name,

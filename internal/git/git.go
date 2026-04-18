@@ -53,6 +53,9 @@ func runGit(repoPath string, args ...string) (string, error) {
 		if msg == "" {
 			msg = strings.TrimSpace(stdout.String())
 		}
+		if msg == "" {
+			return "", fmt.Errorf("git %s: %w", args[0], err)
+		}
 		return "", fmt.Errorf("%s", msg)
 	}
 	return strings.TrimSpace(stdout.String()), nil
@@ -226,6 +229,12 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 	jobs := make(chan ref, workers*2)
 	var wg sync.WaitGroup
 	var progress atomic.Int32
+	var progressMu sync.Mutex
+	isTTY := isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd())
+	// Pre-compute max line length so \r + space-padding can fully overwrite
+	// previous output without relying on ANSI \x1b[2K (unsupported on some
+	// Windows terminals).
+	maxProgressLen := len(fmt.Sprintf("Analysing branches... %d/%d", total, total))
 
 	for range workers {
 		wg.Add(1)
@@ -242,9 +251,13 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 						found:  true,
 					}
 				}
-				n := progress.Add(1)
-				if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
-					fmt.Fprintf(os.Stderr, "\rAnalysing branches... %d/%d", n, total)
+				if isTTY {
+					n := progress.Add(1)
+					progressMu.Lock()
+					fmt.Fprintf(os.Stderr, "\r%-*s", maxProgressLen, fmt.Sprintf("Analysing branches... %d/%d", n, total))
+					progressMu.Unlock()
+				} else {
+					progress.Add(1)
 				}
 			}
 		}()
@@ -255,7 +268,7 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 	}
 	close(jobs)
 	wg.Wait()
-	if isatty.IsTerminal(os.Stderr.Fd()) || isatty.IsCygwinTerminal(os.Stderr.Fd()) {
+	if isTTY {
 		fmt.Fprintln(os.Stderr)
 	}
 
@@ -288,16 +301,23 @@ func MergedBranchesAnywhere(repoPath string, includeRemote bool, sortBy SortFiel
 	return candidates, nil
 }
 
+// firstParentEntry holds the cached result and a sync.Once to ensure the
+// expensive rev-list is computed exactly once per container branch.
+type firstParentEntry struct {
+	once sync.Once
+	shas map[string]bool
+}
+
 // firstParentCache caches the set of first-parent commit SHAs per container branch.
 // Computing this per container once (rather than per candidate) is a major speedup:
 // a container with 100k commits would otherwise be rev-listed once per candidate.
 type firstParentCache struct {
 	mu    sync.Mutex
-	cache map[string]map[string]bool
+	cache map[string]*firstParentEntry
 }
 
 func newFirstParentCache() *firstParentCache {
-	return &firstParentCache{cache: make(map[string]map[string]bool)}
+	return &firstParentCache{cache: make(map[string]*firstParentEntry)}
 }
 
 // FirstParentCache is an opaque cache for first-parent ancestry queries.
@@ -311,34 +331,29 @@ func NewFirstParentCache() *FirstParentCache {
 }
 
 // isTrivialAncestor returns true if tip is on the first-parent path of container.
-// The first-parent list is computed once per container and then cached.
-// A double-checked locking pattern prevents redundant rev-list calls and ensures
-// all goroutines ultimately read from the same cached map.
+// The first-parent list is computed exactly once per container via sync.Once,
+// preventing redundant rev-list calls when multiple goroutines query the same container.
 func (c *firstParentCache) isTrivialAncestor(repoPath, tip, container string) bool {
 	c.mu.Lock()
-	shas, ok := c.cache[container]
-	c.mu.Unlock()
+	entry, ok := c.cache[container]
 	if !ok {
+		entry = &firstParentEntry{}
+		c.cache[container] = entry
+	}
+	c.mu.Unlock()
+
+	entry.once.Do(func() {
 		out, err := runGit(repoPath, "rev-list", "--first-parent", container)
-		newShas := make(map[string]bool)
+		entry.shas = make(map[string]bool)
 		if err == nil {
 			for _, line := range splitLines(out) {
 				if line != "" {
-					newShas[line] = true
+					entry.shas[line] = true
 				}
 			}
 		}
-		c.mu.Lock()
-		// Re-check: another goroutine may have populated the entry while we were computing.
-		if existing, ok2 := c.cache[container]; ok2 {
-			shas = existing
-		} else {
-			c.cache[container] = newShas
-			shas = newShas
-		}
-		c.mu.Unlock()
-	}
-	return shas[tip]
+	})
+	return entry.shas[tip]
 }
 
 // preferredBases are checked first when picking which branch to show in "merged into".
@@ -563,7 +578,8 @@ func FilterByExcludeMergedInto(branches []Branch, patterns []string) ([]Branch, 
 	}
 	compiled := make([]*regexp.Regexp, 0, len(patterns))
 	for _, p := range patterns {
-		re, err := regexp.Compile(p)
+		// Auto-anchor so that "main" doesn't match "domain" or "mainline".
+		re, err := regexp.Compile("^(?:" + p + ")$")
 		if err != nil {
 			return nil, fmt.Errorf("invalid --exclude-merged-into pattern %q: %w", p, err)
 		}
@@ -586,14 +602,24 @@ func FilterByExcludeMergedInto(branches []Branch, patterns []string) ([]Branch, 
 }
 
 // FilterProtected removes protected branch names from the list.
+// Supports glob patterns (e.g. "release/*") for consistency with --tier.
 func FilterProtected(branches []Branch, protected []string) []Branch {
-	protectedSet := make(map[string]bool, len(protected))
+	trimmed := make([]string, 0, len(protected))
 	for _, p := range protected {
-		protectedSet[strings.TrimSpace(p)] = true
+		if t := strings.TrimSpace(p); t != "" {
+			trimmed = append(trimmed, t)
+		}
 	}
 	var filtered []Branch
 	for _, b := range branches {
-		if !protectedSet[b.Name] {
+		matched := false
+		for _, p := range trimmed {
+			if globMatch(p, b.Name) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
 			filtered = append(filtered, b)
 		}
 	}
@@ -717,10 +743,10 @@ func VerifyMerged(repoPath string, b Branch, fpc *FirstParentCache) error {
 	return assertMergedAnywhereWithCache(repoPath, b, fpc)
 }
 
-// DeleteLocalBranch deletes a local branch without re-verifying merge status.
-// Call VerifyMerged first to ensure safety.
+// DeleteLocalBranch deletes a local branch using -d (safe delete).
+// Git's own merge check provides a second safety net on top of VerifyMerged.
 func DeleteLocalBranch(repoPath string, b Branch) error {
-	_, err := runGit(repoPath, "branch", "-D", b.Name)
+	_, err := runGit(repoPath, "branch", "-d", "--", b.Name)
 	return err
 }
 
@@ -732,7 +758,8 @@ func BatchDeleteRemoteBranches(repoPath string, names []string) error {
 	if len(names) == 0 {
 		return nil
 	}
-	args := append([]string{"push", "origin", "--delete"}, names...)
+	args := []string{"push", "origin", "--delete", "--"}
+	args = append(args, names...)
 	_, err := runGit(repoPath, args...)
 	return err
 }
@@ -743,7 +770,7 @@ func assertMergedInto(repoPath string, b Branch, target string) error {
 	if b.IsRemote {
 		ref = "origin/" + b.Name
 	}
-	_, err := runGit(repoPath, "merge-base", "--is-ancestor", ref, target)
+	_, err := runGit(repoPath, "merge-base", "--is-ancestor", "--", ref, target)
 	if err != nil {
 		return fmt.Errorf("branch %q is not fully merged into %s — refusing to delete", b.Name, target)
 	}

@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
+
+	"github.com/arcmantle/git-branch-pruner/internal/git"
 )
 
 // ---------------------------------------------------------------------------
@@ -179,6 +182,158 @@ func TestIsURL(t *testing.T) {
 		got := isURL(tc.s)
 		if got != tc.want {
 			t.Errorf("isURL(%q) = %v, want %v", tc.s, got, tc.want)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loadBranchCSV
+// ---------------------------------------------------------------------------
+
+func TestLoadBranchCSV(t *testing.T) {
+	input := `# remote_url: https://example.com/repo.git
+# generated: 2025-01-01T00:00:00Z
+name,type,merged_into,age_days,relative_age,last_commit,sha,author
+feature/a,local,main,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abcdef123456,Alice
+feature/b,remote,release/1.0,20,20 days ago,2024-12-22,def1234567890abcdef1234567890abcdef123456,Bob
+`
+	branches, err := loadBranchCSV(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(branches) != 2 {
+		t.Fatalf("expected 2 branches, got %d", len(branches))
+	}
+	if branches[0].Name != "feature/a" || branches[0].IsRemote != false || branches[0].MergedInto != "main" {
+		t.Errorf("branch 0: %+v", branches[0])
+	}
+	if branches[1].Name != "feature/b" || branches[1].IsRemote != true || branches[1].MergedInto != "release/1.0" {
+		t.Errorf("branch 1: %+v", branches[1])
+	}
+}
+
+func TestLoadBranchCSV_Empty(t *testing.T) {
+	input := `name,type,merged_into,age_days,relative_age,last_commit,sha,author
+`
+	branches, err := loadBranchCSV(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(branches) != 0 {
+		t.Errorf("expected 0 branches, got %d", len(branches))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loadBranchJSON
+// ---------------------------------------------------------------------------
+
+func TestLoadBranchJSON_Wrapper(t *testing.T) {
+	input := `{
+  "meta": {"repo": "/tmp/test"},
+  "branches": [
+    {"name": "feature/x", "type": "local", "merged_into": "main", "sha": "abc1234"},
+    {"name": "fix/y", "type": "remote", "merged_into": "develop", "sha": "def5678"}
+  ]
+}`
+	branches, err := loadBranchJSON(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(branches) != 2 {
+		t.Fatalf("expected 2 branches, got %d", len(branches))
+	}
+	if branches[0].Name != "feature/x" || branches[0].IsRemote != false {
+		t.Errorf("branch 0: %+v", branches[0])
+	}
+	if branches[1].Name != "fix/y" || branches[1].IsRemote != true {
+		t.Errorf("branch 1: %+v", branches[1])
+	}
+}
+
+func TestLoadBranchJSON_Empty(t *testing.T) {
+	input := `{"branches": []}`
+	branches, err := loadBranchJSON(strings.NewReader(input))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(branches) != 0 {
+		t.Errorf("expected 0 branches, got %d", len(branches))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// loadBranchCSV / loadBranchJSON — dash-prefixed name validation
+// ---------------------------------------------------------------------------
+
+func TestLoadBranchCSV_RejectsDashName(t *testing.T) {
+	input := `name,type,merged_into,age_days,relative_age,last_commit,sha,author
+--delete,local,main,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abcdef123456,Alice
+`
+	_, err := loadBranchCSV(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("expected error for dash-prefixed branch name, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot start with '-'") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestLoadBranchCSV_RejectsDashMergedInto(t *testing.T) {
+	input := `name,type,merged_into,age_days,relative_age,last_commit,sha,author
+feature/x,local,--all,10,10 days ago,2025-01-01,abc1234567890abcdef1234567890abcdef123456,Alice
+`
+	_, err := loadBranchCSV(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("expected error for dash-prefixed merged_into, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not start with '-'") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestLoadBranchJSON_RejectsDashName(t *testing.T) {
+	input := `{"branches": [{"name": "--force", "type": "local", "merged_into": "main"}]}`
+	_, err := loadBranchJSON(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("expected error for dash-prefixed branch name, got nil")
+	}
+	if !strings.Contains(err.Error(), "cannot start with '-'") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+func TestLoadBranchJSON_RejectsDashMergedInto(t *testing.T) {
+	input := `{"branches": [{"name": "feature/x", "type": "local", "merged_into": "--all"}]}`
+	_, err := loadBranchJSON(strings.NewReader(input))
+	if err == nil {
+		t.Fatal("expected error for dash-prefixed merged_into, got nil")
+	}
+	if !strings.Contains(err.Error(), "must not start with '-'") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// FilterProtected with globs
+// ---------------------------------------------------------------------------
+
+func TestFilterProtected_Glob(t *testing.T) {
+	branches := []git.Branch{
+		{Name: "main"},
+		{Name: "release/1.0"},
+		{Name: "release/2.0"},
+		{Name: "feature/foo"},
+		{Name: "hotfix/urgent"},
+	}
+	protected := []string{"main", "release/*"}
+	got := git.FilterProtected(branches, protected)
+	if len(got) != 2 {
+		t.Fatalf("expected 2 branches, got %d: %v", len(got), got)
+	}
+	for _, b := range got {
+		if b.Name == "main" || strings.HasPrefix(b.Name, "release/") {
+			t.Errorf("protected branch %q survived FilterProtected", b.Name)
 		}
 	}
 }

@@ -45,7 +45,7 @@ Use --target to narrow the search to branches merged into a specific branch only
 A remote URL can be passed as an argument — the repository will be cloned
 automatically (blobless bare clone) and cleaned up after the command finishes.`,
 	Args: cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
+	RunE: func(cmd *cobra.Command, args []string) (retErr error) {
 		if err := git.ValidateSortField(listSort); err != nil {
 			return err
 		}
@@ -55,10 +55,10 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 		format := listFormat
 		// Auto-detect format from output file extension if --format not explicitly set
 		if listOutput != "" && !cmd.Flags().Changed("format") {
-			switch {
-			case strings.HasSuffix(listOutput, ".csv"):
+			switch strings.ToLower(filepath.Ext(listOutput)) {
+			case ".csv":
 				format = "csv"
-			case strings.HasSuffix(listOutput, ".json"):
+			case ".json":
 				format = "json"
 			}
 		}
@@ -91,7 +91,11 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 		if err != nil {
 			return err
 		}
-		defer closeOut()
+		defer func() {
+			if err := closeOut(); err != nil && retErr == nil {
+				retErr = fmt.Errorf("closing output file: %w", err)
+			}
+		}()
 
 		if len(branches) == 0 {
 			if fileMode {
@@ -142,15 +146,17 @@ automatically (blobless bare clone) and cleaned up after the command finishes.`,
 
 // resolveOutput returns a writer and a close func for the given path.
 // If path is empty, returns os.Stdout with a no-op closer.
-func resolveOutput(path string) (io.Writer, func(), error) {
+// The caller MUST check the error returned by the close func — on buffered or
+// network filesystems, Close is when data is flushed and errors can surface.
+func resolveOutput(path string) (io.Writer, func() error, error) {
 	if path == "" {
-		return os.Stdout, func() {}, nil
+		return os.Stdout, func() error { return nil }, nil
 	}
 	f, err := os.Create(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("opening output file: %w", err)
 	}
-	return f, func() { f.Close() }, nil
+	return f, f.Close, nil
 }
 
 // buildRows converts branches into string rows.
@@ -256,7 +262,7 @@ func writeJSON(w io.Writer, branches []git.Branch, meta map[string]string) error
 	records := make([]jsonBranch, len(branches))
 	for i, b := range branches {
 		bType := "local"
-		if b.IsRemote {
+		if b.IsRemote || isBareClone {
 			bType = "remote"
 		}
 		jb := jsonBranch{
