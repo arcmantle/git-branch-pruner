@@ -5,6 +5,7 @@ import (
 "os"
 "regexp"
 "strings"
+"unicode/utf8"
 
 "github.com/arcmantle/git-branch-pruner/internal/git"
 "github.com/fatih/color"
@@ -14,9 +15,9 @@ import (
 
 var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
-// visibleLen returns the printable length of s, ignoring ANSI escape codes.
+// visibleLen returns the printable rune count of s, ignoring ANSI escape codes.
 func visibleLen(s string) int {
-return len(ansiRe.ReplaceAllString(s, ""))
+	return utf8.RuneCountInString(ansiRe.ReplaceAllString(s, ""))
 }
 
 // terminalWidth returns the current terminal width, falling back to 120.
@@ -27,12 +28,13 @@ func terminalWidth() int {
 	return 120
 }
 
-// truncate shortens s to at most maxLen visible characters, appending "…" if cut.
+// truncate shortens s to at most maxLen visible runes, appending "…" if cut.
 func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	if utf8.RuneCountInString(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-1] + "…"
+	runes := []rune(s)
+	return string(runes[:maxLen-1]) + "…"
 }
 
 // printTable prints headers and rows with automatic column alignment.
@@ -78,7 +80,7 @@ func printTable(headers []string, rows [][]string) {
 	for i, h := range headers {
 		cell := headerColor.Sprint(h)
 		if i < n-1 {
-			fmt.Print(cell + strings.Repeat(" ", widths[i]+colPad-len(h)))
+			fmt.Print(cell + strings.Repeat(" ", widths[i]+colPad-utf8.RuneCountInString(h)))
 		} else {
 			fmt.Println(cell)
 		}
