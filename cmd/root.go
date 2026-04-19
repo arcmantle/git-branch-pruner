@@ -191,10 +191,6 @@ var rootCmd = &cobra.Command{
 		}
 
 		// If the first positional arg looks like a URL, clone it to a temp bare repo.
-		// prune does not support remote URLs — catch it here before an expensive clone.
-		if len(args) > 0 && isURL(args[0]) && cmd.Name() == "prune" {
-			return fmt.Errorf("prune does not support remote URLs — use 'list <url>' to analyse a remote repository")
-		}
 		if len(args) > 0 && isURL(args[0]) {
 			url := args[0]
 			tmpDir, err := os.MkdirTemp("", "git-branch-pruner-*")

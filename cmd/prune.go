@@ -36,7 +36,7 @@ var (
 )
 
 var pruneCmd = &cobra.Command{
-	Use:   "prune",
+	Use:   "prune [url]",
 	Short: "Delete merged branches",
 	Long: `Delete branches that have been merged and are safe to remove.
 
@@ -49,15 +49,13 @@ Use --input to supply a CSV or JSON file produced by 'list --output': only the
 branches listed in the file will be deleted. Edit the file first to remove any
 branches you want to keep.
 
-Note: prune does not support remote URLs. Use 'list <url>' to analyse a remote
-repository without cloning it yourself.`,
+A remote URL can be passed as an argument — the repository will be cloned
+automatically (blobless bare clone) and cleaned up after the command finishes.
+Branches are deleted on the remote via git push.`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		if isBareClone {
-			return fmt.Errorf("prune is not supported for remote URLs — use 'list <url>' to analyse a remote repository")
-		}
-		if len(args) > 0 {
-			return fmt.Errorf("prune does not accept positional arguments (got %q); use --target to specify a branch", args[0])
+		if len(args) > 0 && !isBareClone {
+			return fmt.Errorf("prune does not accept positional arguments (got %q); use --target to specify a branch, or pass a URL to delete branches on a remote repository", args[0])
 		}
 		if err := git.ValidateSortField(pruneSort); err != nil {
 			return err
@@ -124,7 +122,8 @@ repository without cloning it yourself.`,
 				}
 			}
 		} else {
-			branches, err := resolveBranches(pruneTarget, pruneRemote, git.SortField(pruneSort))
+			includeRemote := pruneRemote || isBareClone
+			branches, err := resolveBranches(pruneTarget, includeRemote, git.SortField(pruneSort))
 			if err != nil {
 				return err
 			}
@@ -144,6 +143,14 @@ repository without cloning it yourself.`,
 				} else {
 					deletable = append(deletable, b)
 				}
+			}
+		}
+
+		// In a bare clone every branch must be pushed as a remote deletion;
+		// the temp clone has no meaningful local branches to remove.
+		if isBareClone {
+			for i := range deletable {
+				deletable[i].IsRemote = true
 			}
 		}
 
